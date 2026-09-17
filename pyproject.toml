@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orbwatch"
+version = "0.0.1"
+description = "Mission design toolchain for inspecting an object already in orbit"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "astropy>=6.0",
+    "sgp4>=2.23",
+    "matplotlib>=3.8",
+    # Mozilla CA bundle. The python.org macOS installer ships without a usable
+    # certificate store, so stdlib HTTPS fails there until something supplies one.
+    "certifi>=2024.2.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+]
+
+# Notebooks are installed separately so a compiler-dependent transitive build
+# cannot block the core test environment.
+notebooks = [
+    "jupyterlab>=4.0",
+]
+
+[project.scripts]
+orbwatch-gui = "orbwatch.gui.server:main"
+
+[tool.setuptools.packages.find]
+include = ["orbwatch*"]
+
+[tool.setuptools.package-data]
+"orbwatch.gui" = ["static/*", "static/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "network: hits the public internet, deselect with -m 'not network'",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "NPY"]

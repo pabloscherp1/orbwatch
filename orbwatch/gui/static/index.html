@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ORBWATCH Tracker</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='14' fill='none' stroke='%234fd1ff' stroke-width='4'/%3E%3Cellipse cx='32' cy='32' rx='29' ry='11' fill='none' stroke='%23ff4d5e' stroke-width='3' transform='rotate(-28 32 32)'/%3E%3Ccircle cx='55' cy='20' r='5' fill='%23ffe45c'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 64 64" aria-hidden="true">
+        <circle cx="32" cy="32" r="13" class="brand-earth"/>
+        <ellipse cx="32" cy="32" rx="28" ry="10" class="brand-orbit" transform="rotate(-28 32 32)"/>
+        <circle cx="54" cy="21" r="4.5" class="brand-sat"/>
+      </svg>
+      <span class="brand-name">ORBWATCH</span>
+      <span class="brand-sub">TRACKER</span>
+    </div>
+
+    <form id="object-form" class="object-form" autocomplete="off">
+      <label for="norad-input">NORAD</label>
+      <input id="norad-input" inputmode="numeric" pattern="[0-9]*" placeholder="25544" aria-label="NORAD catalogue number">
+      <button type="submit" class="btn-accent">TRACK</button>
+      <select id="object-preset" aria-label="Object presets">
+        <option value="">PRESETS</option>
+      </select>
+    </form>
+
+    <div class="status">
+      <span id="status-mode" class="pill pill-live">LIVE</span>
+      <span id="status-age" class="pill">TLE --</span>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <section class="globe-wrap" id="globe-wrap">
+      <canvas id="globe" aria-label="Orthographic globe with ground track, footprint and ground station"></canvas>
+
+      <div class="hud hud-tl">
+        <div class="hud-title" id="hud-object">--</div>
+        <div class="hud-line"><span id="hud-view">FOLLOW</span> · ORTHOGRAPHIC · WGS-84</div>
+      </div>
+
+      <div class="hud hud-tr">
+        <button id="btn-follow" class="btn-ghost" title="Follow the object (F)">⌖ FOLLOW</button>
+      </div>
+
+      <div class="hud hud-bl legend">
+        <span class="chip"><i class="sw sw-track"></i>GROUND TRACK</span>
+        <span class="chip"><i class="sw sw-foot"></i>FOOTPRINT</span>
+        <span class="chip"><i class="sw sw-station"></i>STATION HORIZON</span>
+        <span class="chip"><i class="sw sw-sun"></i>SUN</span>
+      </div>
+
+      <div class="hud hud-br hint">DRAG ROTATE · SCROLL ZOOM · DOUBLE-CLICK FOLLOW</div>
+
+      <div id="loading" class="loading"><span>ACQUIRING ELEMENT SET</span></div>
+      <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    </section>
+
+    <aside class="panel">
+      <nav class="tabs" role="tablist">
+        <button class="tab active" data-tab="telemetry" role="tab">TELEMETRY</button>
+        <button class="tab" data-tab="passes" role="tab">PASSES</button>
+        <button class="tab" data-tab="elements" role="tab">ELEMENTS</button>
+        <button class="tab" data-tab="setup" role="tab">SETUP</button>
+      </nav>
+
+      <!-- TELEMETRY -->
+      <div class="tab-body active" id="tab-telemetry">
+        <div class="obj-head">
+          <div class="obj-name" id="t-name">--</div>
+          <div class="obj-ids"><span>NORAD <b id="t-norad">--</b></span><span>COSPAR <b id="t-cospar">--</b></span></div>
+        </div>
+
+        <div class="grid-rows">
+          <div class="row"><span class="k">UTC</span><span class="v" id="t-utc">--</span></div>
+          <div class="row"><span class="k">LOCAL</span><span class="v" id="t-local">--</span></div>
+          <div class="row"><span class="k">T-EPOCH</span><span class="v" id="t-age">--</span></div>
+          <div class="row"><span class="k">PERIOD</span><span class="v" id="t-period">--</span></div>
+          <div class="row"><span class="k">INCL</span><span class="v" id="t-incl">--</span></div>
+          <div class="row"><span class="k">ORBIT</span><span class="v" id="t-orbit">--</span></div>
+        </div>
+
+        <div class="section-title">STATE <span class="note">SGP4 → TEME → WGS-84</span></div>
+        <div class="grid-rows">
+          <div class="row"><span class="k">ALT</span><span class="v" id="t-alt">--</span></div>
+          <div class="row"><span class="k">LAT</span><span class="v" id="t-lat">--</span></div>
+          <div class="row"><span class="k">LON</span><span class="v" id="t-lon">--</span></div>
+          <div class="row"><span class="k">SPEED</span><span class="v" id="t-speed">--</span></div>
+          <div class="row"><span class="k">LIGHT</span><span class="v" id="t-light">--</span></div>
+        </div>
+
+        <div class="section-title">STATION <span class="note" id="t-site">--</span></div>
+        <div class="station-block">
+          <div class="grid-rows">
+            <div class="row"><span class="k">RANGE</span><span class="v" id="t-range">--</span></div>
+            <div class="row"><span class="k">ELEV</span><span class="v" id="t-elev">--</span></div>
+            <div class="row"><span class="k">AZIM</span><span class="v" id="t-azim">--</span></div>
+            <div class="row"><span class="k">STATUS</span><span class="v" id="t-status">--</span></div>
+          </div>
+          <div class="sky">
+            <canvas id="skyplot" width="200" height="200" aria-label="Sky plot of the current or next pass"></canvas>
+            <div class="sky-caption" id="sky-caption">SKY · NEXT PASS</div>
+          </div>
+        </div>
+
+        <div class="section-title">NEXT PASS</div>
+        <div class="grid-rows">
+          <div class="row"><span class="k">AOS</span><span class="v" id="t-aos">--</span></div>
+          <div class="row"><span class="k">MAX EL</span><span class="v" id="t-maxel">--</span></div>
+          <div class="row"><span class="k">LOS</span><span class="v" id="t-los">--</span></div>
+        </div>
+      </div>
+
+      <!-- PASSES -->
+      <div class="tab-body" id="tab-passes">
+        <div class="section-title">PASSES OVER <span id="p-site">--</span> <span class="note" id="p-mask"></span></div>
+        <div class="table-wrap">
+          <table class="passes">
+            <thead><tr><th>DATE</th><th>AOS</th><th>LOS</th><th>DUR</th><th>MAX</th><th>AZ</th></tr></thead>
+            <tbody id="p-body"><tr><td colspan="6" class="empty">--</td></tr></tbody>
+          </table>
+        </div>
+        <p class="footnote">Click a pass to jump the clock to 2 minutes before AOS. Times are UTC. Pass times inherit the along-track error of the element set, which grows with its age.</p>
+      </div>
+
+      <!-- ELEMENTS -->
+      <div class="tab-body" id="tab-elements">
+        <div class="section-title">ELEMENT SET <span class="note" id="e-source">CELESTRAK GP</span></div>
+        <pre class="tle" id="e-tle">--</pre>
+        <button class="btn-ghost btn-small" id="e-copy">COPY TLE</button>
+        <div class="section-title">MEAN ELEMENTS</div>
+        <div class="grid-rows" id="e-rows"></div>
+        <div class="callout">
+          <b>These are not a state vector.</b> They are mean elements fitted inside the SGP4 theory. Every position on this screen comes from running SGP4, never from converting these numbers with two-body formulae, which puts the ISS about 12 km off at epoch and about 470 km off a day later.
+        </div>
+      </div>
+
+      <!-- SETUP -->
+      <div class="tab-body" id="tab-setup">
+        <div class="section-title">GROUND STATION</div>
+        <form id="site-form" class="form-grid" autocomplete="off">
+          <label class="span2">PRESET
+            <select id="site-preset"></select>
+          </label>
+          <label class="span2">NAME <input id="site-name" maxlength="40"></label>
+          <label>LAT DEG <input id="site-lat" type="number" step="0.0001" min="-90" max="90"></label>
+          <label>LON DEG <input id="site-lon" type="number" step="0.0001" min="-180" max="180"></label>
+          <label>ALT KM <input id="site-alt" type="number" step="0.001" min="-0.5" max="10"></label>
+          <label>MASK DEG <input id="site-mask" type="number" step="0.5" min="0" max="45"></label>
+          <button type="submit" class="btn-accent span2">APPLY</button>
+        </form>
+        <p class="footnote">Preset coordinates are approximate. Heights are above the WGS-84 ellipsoid.</p>
+
+        <div class="section-title">LAYERS</div>
+        <div class="toggles" id="layer-toggles"></div>
+
+        <div class="section-title">KEYS</div>
+        <div class="keys">
+          <span><kbd>Space</kbd> pause</span><span><kbd>←</kbd><kbd>→</kbd> rate</span>
+          <span><kbd>L</kbd> live</span><span><kbd>F</kbd> follow</span><span><kbd>1</kbd>-<kbd>4</kbd> tabs</span>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="clockbar">
+    <div class="clock">
+      <div class="clock-time" id="clock-time">00:00:00</div>
+      <div class="clock-date" id="clock-date">-- UTC</div>
+    </div>
+    <div class="countdown">
+      <div class="countdown-label" id="countdown-label">NEXT AOS</div>
+      <div class="countdown-value" id="countdown-value">--:--:--</div>
+      <div class="countdown-sub" id="countdown-sub"></div>
+    </div>
+    <div class="controls">
+      <button data-act="back" title="Back 10 minutes">−10M</button>
+      <button data-act="slower" title="Slower (←)">◀◀</button>
+      <button data-act="toggle" id="btn-play" title="Pause (Space)">❚❚</button>
+      <button data-act="faster" title="Faster (→)">▶▶</button>
+      <button data-act="fwd" title="Forward 10 minutes">+10M</button>
+      <span class="rate" id="rate">×1</span>
+      <button data-act="live" class="btn-live" title="Return to live (L)">LIVE</button>
+    </div>
+  </footer>
+</div>
+
+<script src="vendor/d3.min.js"></script>
+<script src="vendor/topojson-client.min.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
