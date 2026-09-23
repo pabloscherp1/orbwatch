@@ -59,7 +59,7 @@ class CatalogFetchError(RuntimeError):
         self.status = status
 
 
-def _ssl_context() -> ssl.SSLContext:
+def ssl_context() -> ssl.SSLContext:
     """An SSL context backed by the certifi CA bundle.
 
     The python.org macOS installer does not populate a certificate store, so
@@ -113,7 +113,7 @@ def http_get_text(url: str, timeout_s: float = _HTTP_TIMEOUT_S) -> str:
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
         with urllib.request.urlopen(
-            request, timeout=timeout_s, context=_ssl_context()
+            request, timeout=timeout_s, context=ssl_context()
         ) as response:
             return response.read().decode("utf-8")
     except urllib.error.HTTPError as error:
