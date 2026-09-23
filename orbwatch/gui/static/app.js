@@ -8,6 +8,8 @@
  * kilometre of error for a low orbit, far below one screen pixel.
  */
 
+import { createBehaviourView } from "./behaviour.js";
+
 const d3 = window.d3;
 const topojson = window.topojson;
 
@@ -24,11 +26,13 @@ const OBJECT_PRESETS = [
   { norad: 40697, label: "SENTINEL-2A" },
   { norad: 33591, label: "NOAA 19" },
   { norad: 41866, label: "GOES 16 (GEO)" },
+  { norad: 40882, label: "INMARSAT 5-F3 (GEO, HELD)" },
+  { norad: 27438, label: "INTELSAT 905 (GEO, DRIFTING)" },
 ];
 
 const STATION_PRESETS = [
   { name: "Zurich", lat: 47.3769, lon: 8.5417, alt: 0.45 },
-  { name: "Pasadena JPL", lat: 34.2013, lon: -118.1714, alt: 0.35 },
+  { name: "Pasadena", lat: 34.2013, lon: -118.1714, alt: 0.35 },
   { name: "Svalbard", lat: 78.2297, lon: 15.3975, alt: 0.5 },
   { name: "Kiruna", lat: 67.8571, lon: 20.9644, alt: 0.4 },
   { name: "Kourou", lat: 5.2514, lon: -52.8047, alt: 0.05 },
@@ -82,6 +86,7 @@ const COLORS = {
 const stored = JSON.parse(localStorage.getItem("orbwatch.settings") || "{}");
 
 const state = {
+  mainView: "globe",
   norad: null,
   object: null,
   track: null,
@@ -226,10 +231,11 @@ async function loadObject(norad) {
     state.passes = null;
     state.skyTracks.clear();
     state.view.follow = true;
-    history.replaceState(null, "", `#norad=${norad}`);
+    updateHash();
     document.title = `${object.name} · ORBWATCH`;
     $("norad-input").value = norad;
     renderElements();
+    behaviour.setObject(norad, object.name);
   } catch (error) {
     toast(`Could not load NORAD ${norad}: ${error.message}`);
     if (!state.object) $("loading").querySelector("span").textContent = "NO ELEMENT SET LOADED";
@@ -692,17 +698,19 @@ function frame() {
   const cur = state.track ? sampleAt(state.track, now) : null;
   updateFollow(cur);
 
-  const r = baseRadius * state.view.zoom;
-  projection.scale(r).rotate(state.view.rotate);
-  const [cx, cy] = projection.translate();
+  if (state.mainView === "globe" && width > 0 && height > 0) {
+    const r = baseRadius * state.view.zoom;
+    projection.scale(r).rotate(state.view.rotate);
+    const [cx, cy] = projection.translate();
 
-  drawBackdrop(cx, cy, r);
-  drawEarth(cur);
-  drawTrack(now);
-  drawFootprint(cur);
-  drawStation(cur, t);
-  drawSun(cur);
-  drawSatellite(cur, t);
+    drawBackdrop(cx, cy, r);
+    drawEarth(cur);
+    drawTrack(now);
+    drawFootprint(cur);
+    drawStation(cur, t);
+    drawSun(cur);
+    drawSatellite(cur, t);
+  }
 
   if (t * 1000 - state.lastPanelUpdate > 100) {
     state.lastPanelUpdate = t * 1000;
@@ -1001,10 +1009,43 @@ function renderElements() {
 // Setup and interaction
 // ---------------------------------------------------------------------------
 
+const TABS = ["telemetry", "passes", "elements", "setup", "events"];
+
 function selectTab(name) {
   for (const tab of document.querySelectorAll(".tab")) tab.classList.toggle("active", tab.dataset.tab === name);
   for (const body of document.querySelectorAll(".tab-body")) body.classList.toggle("active", body.id === `tab-${name}`);
+  if (name === "events" && state.mainView !== "behaviour") setMainView("behaviour");
 }
+
+function updateHash() {
+  if (state.norad === null) return;
+  const view = state.mainView === "behaviour" ? "&view=behaviour" : "";
+  history.replaceState(null, "", `#norad=${state.norad}${view}`);
+}
+
+function setMainView(name) {
+  state.mainView = name;
+  $("globe-wrap").hidden = name !== "globe";
+  $("behaviour-wrap").hidden = name !== "behaviour";
+  for (const button of document.querySelectorAll(".view-switch button")) {
+    button.classList.toggle("on", button.dataset.view === name);
+  }
+  if (name === "globe") {
+    behaviour.deactivate();
+    resize();
+  } else {
+    behaviour.activate();
+    selectTab("events");
+  }
+  updateHash();
+}
+
+const behaviour = createBehaviourView({
+  getJSON,
+  onShowRequested: () => {
+    if (state.mainView !== "behaviour") setMainView("behaviour");
+  },
+});
 
 function fillSiteForm() {
   $("site-name").value = state.site.name;
@@ -1082,6 +1123,9 @@ function setupControls() {
   }
 
   for (const tab of document.querySelectorAll(".tab")) tab.addEventListener("click", () => selectTab(tab.dataset.tab));
+  for (const button of document.querySelectorAll(".view-switch button")) {
+    button.addEventListener("click", () => setMainView(button.dataset.view));
+  }
 
   $("e-copy").addEventListener("click", async () => {
     if (!state.object) return;
@@ -1115,7 +1159,8 @@ function setupControls() {
     else if (key === "arrowleft") actions.slower();
     else if (key === "l") actions.live();
     else if (key === "f") state.view.follow = !state.view.follow;
-    else if (["1", "2", "3", "4"].includes(key)) selectTab(["telemetry", "passes", "elements", "setup"][Number(key) - 1]);
+    else if (key === "b") setMainView(state.mainView === "globe" ? "behaviour" : "globe");
+    else if (["1", "2", "3", "4", "5"].includes(key)) selectTab(TABS[Number(key) - 1]);
   });
 
   let last = null;
@@ -1155,6 +1200,13 @@ async function loadGeography() {
   geo.borders = topojson.mesh(world110, world110.objects.countries, (a, b) => a !== b);
 }
 
+function followHash() {
+  const norad = /norad=(\d+)/.exec(window.location.hash);
+  const view = /view=behaviour/.test(window.location.hash) ? "behaviour" : "globe";
+  if (view !== state.mainView) setMainView(view);
+  if (norad && Number(norad[1]) !== state.norad) loadObject(Number(norad[1]));
+}
+
 async function main() {
   setupControls();
   fillSiteForm();
@@ -1167,7 +1219,9 @@ async function main() {
     toast(`Map data failed to load: ${error.message}`);
   }
 
+  window.addEventListener("hashchange", followHash);
   const fromHash = /norad=(\d+)/.exec(window.location.hash);
+  if (/view=behaviour/.test(window.location.hash)) setMainView("behaviour");
   await loadObject(fromHash ? Number(fromHash[1]) : OBJECT_PRESETS[0].norad);
 }
 

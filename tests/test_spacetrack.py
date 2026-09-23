@@ -41,7 +41,7 @@ def history_text(count: int, first_day: float = 250.0, step_days: float = 0.5) -
 @pytest.fixture
 def client(tmp_path) -> SpaceTrackClient:
     return SpaceTrackClient(
-        user="pablo", password=PASSWORD, cache_dir=tmp_path, min_request_interval_s=0.0
+        user="tester", password=PASSWORD, cache_dir=tmp_path, min_request_interval_s=0.0
     )
 
 
@@ -55,14 +55,14 @@ def test_dotenv_parsing(tmp_path) -> None:
     path.write_text(
         "# a comment\n"
         "\n"
-        "SPACETRACK_USER=pablo@example.com\n"
+        "SPACETRACK_USER=user@example.com\n"
         'export SPACETRACK_PASSWORD="quoted secret"\n'
         "MALFORMED\n"
         "EMPTY=\n"
     )
     values = load_dotenv(path)
 
-    assert values["SPACETRACK_USER"] == "pablo@example.com"
+    assert values["SPACETRACK_USER"] == "user@example.com"
     assert values["SPACETRACK_PASSWORD"] == "quoted secret"
     assert values["EMPTY"] == ""
     assert "MALFORMED" not in values
@@ -99,7 +99,7 @@ def test_missing_credentials_name_the_variables_but_not_a_value(
     monkeypatch.delenv("SPACETRACK_USER", raising=False)
     monkeypatch.delenv("SPACETRACK_PASSWORD", raising=False)
     path = tmp_path / ".env"
-    path.write_text("SPACETRACK_USER=pablo\n")
+    path.write_text("SPACETRACK_USER=tester\n")
 
     with pytest.raises(AuthenticationError) as caught:
         credentials_from_env(path)
@@ -112,7 +112,7 @@ def test_missing_credentials_name_the_variables_but_not_a_value(
 
 def test_password_never_appears_in_the_repr(client: SpaceTrackClient) -> None:
     assert PASSWORD not in repr(client)
-    assert "pablo" in repr(client)
+    assert "tester" in repr(client)
 
 
 # --------------------------------------------------------------------------
@@ -176,7 +176,7 @@ def test_successful_login_posts_the_documented_fields(
 
     url, data = opener.calls[0]
     assert url == spacetrack.LOGIN_URL
-    assert b"identity=pablo" in data
+    assert b"identity=tester" in data
     assert b"password=" in data
 
 
@@ -288,7 +288,7 @@ def test_requests_are_throttled_to_the_documented_rate(monkeypatch, tmp_path) ->
     monkeypatch.setattr(spacetrack.time, "sleep", lambda s: slept.append(s))
 
     client = SpaceTrackClient(
-        user="pablo", password=PASSWORD, cache_dir=tmp_path, min_request_interval_s=3.0
+        user="tester", password=PASSWORD, cache_dir=tmp_path, min_request_interval_s=3.0
     )
     client._opener = FakeOpener(body="")
 
@@ -301,7 +301,7 @@ def test_requests_are_throttled_to_the_documented_rate(monkeypatch, tmp_path) ->
 
 
 # --------------------------------------------------------------------------
-# Summary used by the feasibility check
+# History summary
 # --------------------------------------------------------------------------
 
 

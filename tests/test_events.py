@@ -23,13 +23,15 @@ from orbwatch.events import (
     OrbitHistory,
     analyse,
     analyse_steps,
+    detect_drag_surges,
     detect_manoeuvres,
     merge_refits,
+    natural_inclination_path_rad,
     natural_inclination_rate_rad_per_day,
     two_sided_transients,
 )
 from orbwatch.events.budget import in_plane_budget, out_of_plane_budget
-from orbwatch.events.detect import MIN_COHERENCE, manoeuvres_from
+from orbwatch.events.detect import FLOOR_OVERRIDE_SIGMAS, MIN_COHERENCE, manoeuvres_from
 from orbwatch.events.history import DataQuality, robust_sigma
 from tests.test_tle import build_line1, build_line2
 
@@ -165,6 +167,22 @@ def test_transient_test_works_on_vectors_and_short_series() -> None:
     assert not two_sided_transients(np.arange(5.0), np.zeros(5)).any()
 
 
+def test_a_bad_run_that_survives_cleaning_is_not_two_burns() -> None:
+    """Regression: INMARSAT 5-F3 sat at zero inclination for several days around
+    1 January 2026, and the run's entry and exit came out as two separate,
+    individually coherent steps. Cleaning is switched off here to force the
+    situation; the pair must be recognised as an excursion."""
+    rng = np.random.default_rng(14)
+    t, a = leo(rng, burns=((80.0, 1.0),))
+    a[(t > 30.0) & (t < 36.0)] -= 0.8
+    history = make_history(t, a)
+
+    candidates = manoeuvres_from(history, analyse_steps(history, "in_plane"))
+    assert sum(m.excursion for m in candidates) == 2
+    found = [m for m in detect_manoeuvres(history) if m.kind == "in_plane"]
+    assert len(found) == 1 and found[0].delta_a_km == pytest.approx(1.0, abs=0.03)
+
+
 # --------------------------------------------------------------------------
 # Low orbit, in-plane
 # --------------------------------------------------------------------------
@@ -210,23 +228,120 @@ def test_an_isolated_bad_fit_is_never_counted_as_burns() -> None:
     assert detect_manoeuvres(history) == []
 
 
-def test_a_drag_surge_is_labelled_sustained_and_left_out_of_the_budget() -> None:
+def test_fast_decay_at_the_start_of_a_window_is_not_a_burn() -> None:
+    """Regression: the ISS year to 2026-09-22 opened with a 40-hour silence
+    while the orbit decayed about three times faster than its yearly median, and
+    the first gap, with no past to estimate the rate from, was flagged as a
+    154 m lowering burn. A reboost right after the edge must still be found."""
+    rng = np.random.default_rng(12)
+    t = np.concatenate([[0.0], 40.0 / 24.0 + sample_times(120.0, rng)])
+    phase = 2.0 * np.pi * t / 27.0
+    rate = 0.09 + 0.06 * np.cos(phase)
+    decay = np.concatenate(
+        [[0.0], np.cumsum(0.5 * (rate[1:] + rate[:-1]) * np.diff(t))]
+    )
+    a = 6793.2 - decay + rng.normal(0.0, 0.005, t.size)
+    reboost_at = 2.2
+    a[t > reboost_at] += 3.5
+    history = make_history(t, a)
+
+    events = detect_manoeuvres(history)
+    assert not [m for m in events if m.start_utc == history.epochs_utc[0]]
+    reboosts = [m for m in events if m.delta_a_km and m.delta_a_km > 3.0]
+    assert len(reboosts) == 1
+    assert reboosts[0].start_utc <= T0 + timedelta(days=reboost_at)
+
+    analysis = analyse_steps(history, "in_plane")
+    assert analysis.edge[0], "the first gap has no past"
+    assert analysis.magnitude[0] > analysis.threshold, "premise: plain 5 sigma flags it"
+    assert analysis.magnitude[0] < analysis.gap_threshold[0]
+    assert not analysis.edge[analysis.dt_days.size // 2]
+
+
+def test_a_small_burn_on_a_clean_history_is_kept_despite_the_floor() -> None:
+    """Regression: NOAA 20 scatters 0.1 m per gap, and its 57 m raise of
+    28 January 2026, 0.03 m/s at 537 sigma, fell under the 0.05 m/s floor."""
+    rng = np.random.default_rng(15)
+    t = sample_times(120.0, rng)
+    a = 7205.0 - 0.0016 * t + rng.normal(0.0, 0.0001, t.size)
+    a[t > 60.0] += 0.057
+    history = make_history(t, a, np.full(t.size, np.deg2rad(98.76)))
+
+    burns = [m for m in detect_manoeuvres(history) if m.kind == "in_plane"]
+    assert len(burns) == 1
+    assert burns[0].delta_v_m_s < 0.05, "premise: under the floor"
+    assert burns[0].significance > FLOOR_OVERRIDE_SIGMAS["in_plane"]
+    assert burns[0].delta_a_km == pytest.approx(0.057, abs=0.002)
+
+
+def test_a_modest_blip_on_a_noisy_history_still_falls_under_the_floor() -> None:
+    rng = np.random.default_rng(16)
+    t, a = leo(rng, burns=())
+    k = t.size // 2
+    a[k:] -= 0.075
+    history = make_history(t, a)
+
+    analysis = analyse_steps(history, "in_plane")
+    events = [m for m in manoeuvres_from(history, analysis) if m.coherence >= 0.5]
+    assert events and all(m.significance < 30.0 for m in events)
+    assert all(m.delta_v_m_s < 0.05 for m in events)
+    assert not [m for m in detect_manoeuvres(history) if m.kind == "in_plane"]
+
+
+def test_rounded_inclination_never_gives_zero_scatter() -> None:
+    """Regression: NOAA 20's inclination drifts one TLE digit a day or so, most
+    gaps round to no change, and the robust scatter came out as exactly zero."""
+    rng = np.random.default_rng(17)
+    t = sample_times(120.0, rng)
+    inclination_deg = np.round(98.76 + 0.00008 * t, 4)
+    history = make_history(
+        t,
+        7205.0 - 0.0016 * t + rng.normal(0.0, 0.0001, t.size),
+        np.deg2rad(inclination_deg),
+    )
+
+    analysis = analyse_steps(history, "out_of_plane")
+    assert analysis.sigma >= np.deg2rad(1e-4) / np.sqrt(6.0) * 0.999
+    assert not analysis.flagged.any(), "one rounding step is not a manoeuvre"
+
+
+def test_a_drag_surge_is_natural_not_a_manoeuvre_and_counts_as_drag() -> None:
+    """Regression: the G4 storm of 19 January 2026 sped up the decay of every
+    low orbit at once, Hubble included, and was listed as a Hubble manoeuvre."""
     rng = np.random.default_rng(13)
-    t, a = leo(rng, burns=((30.0, 1.5),))
+    t, a = leo(rng, burns=((30.0, 1.5), (90.0, 0.8)))
     surge = (t > 60.0) & (t < 62.5)
-    # Decay two and a half times the usual rate for 2.5 days, like the ISS on
-    # 19 to 22 January 2026, which lost an extra 191 m.
+    # Extra decay of 0.3 km/day for 2.5 days, like the ISS on 19 to 22 January
+    # 2026, which lost an extra 191 m.
     a -= np.where(t > 60.0, np.minimum(t - 60.0, 2.5) * 0.3, 0.0)
     history = make_history(t, a)
-    found = [m for m in detect_manoeuvres(history) if m.kind == "in_plane"]
 
-    drops = [m for m in found if m.delta_a_km < 0]
-    assert surge.any() and len(drops) == 1
-    assert drops[0].profile == "sustained" and drops[0].gaps > 1
+    burns = [m for m in detect_manoeuvres(history) if m.kind == "in_plane"]
+    assert surge.any()
+    assert all(m.delta_a_km > 0 for m in burns) and len(burns) == 2
+
+    surges = detect_drag_surges(history)
+    assert len(surges) == 1
+    assert surges[0].profile == "sustained" and surges[0].gaps > 1
+    assert surges[0].delta_a_km == pytest.approx(-0.75, abs=0.08)
+
     analysis = analyse_steps(history, "in_plane")
-    budget = in_plane_budget(history, analysis, found)
-    raise_dv = [m.delta_v_m_s for m in found if m.delta_a_km > 0]
-    assert budget.detected_m_s == pytest.approx(sum(raise_dv))
+    budget = in_plane_budget(history, analysis, burns, surges)
+    assert budget.detected_m_s == pytest.approx(sum(m.delta_v_m_s for m in burns))
+    assert budget.closure == pytest.approx(1.0, abs=0.05), "the surge is drag"
+    without = in_plane_budget(history, analysis, burns)
+    assert without.closure > 1.25, "premise: ignoring the surge overstates closure"
+
+
+def test_a_sustained_raise_is_still_a_manoeuvre() -> None:
+    rng = np.random.default_rng(14)
+    t, a = leo(rng, burns=())
+    a += np.where(t > 40.0, np.minimum(t - 40.0, 3.0) * 0.4, 0.0)
+    history = make_history(t, a)
+
+    raises = [m for m in detect_manoeuvres(history) if m.kind == "in_plane"]
+    assert len(raises) == 1 and raises[0].profile == "sustained"
+    assert not detect_drag_surges(history)
 
 
 # --------------------------------------------------------------------------
@@ -253,6 +368,22 @@ def test_natural_drift_model_at_zero_inclination() -> None:
     assert 3074.7 * np.deg2rad(per_year_deg) == pytest.approx(47.1, abs=0.1)
     pole = np.array([0.0, np.deg2rad(7.4)])
     assert np.linalg.norm(natural_inclination_rate_rad_per_day(pole)) < 1e-18
+
+
+def test_natural_path_is_the_exact_solution_of_the_rate_model() -> None:
+    start = np.deg2rad([0.01, -0.02])
+    path = natural_inclination_path_rad(start, np.array([0.0, 1e-3, 365.25]))
+    assert np.allclose(path[0], start, atol=1e-15)
+    rate = (path[1] - path[0]) / 1e-3
+    assert np.allclose(rate, natural_inclination_rate_rad_per_day(start), rtol=1e-6)
+
+    from_origin = natural_inclination_path_rad(np.zeros(2), [365.25])[0]
+    assert np.rad2deg(np.linalg.norm(from_origin)) == pytest.approx(0.877, abs=0.003)
+    assert from_origin[0] > 0, "an uncontrolled plane leaves toward a node of 90 deg"
+
+    pole = np.array([0.0, np.deg2rad(7.4)])
+    half_period = natural_inclination_path_rad(start, [53.0 * 365.25 / 2])[0]
+    assert np.allclose(half_period - pole, -(start - pole), atol=1e-12)
 
 
 def test_weekly_north_south_burns_are_found_and_close_the_budget() -> None:

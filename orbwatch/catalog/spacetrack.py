@@ -334,7 +334,7 @@ class SpaceTrackClient:
 
 
 def summarise_history(records: list[TLE]) -> dict[str, object]:
-    """Quick statistics over a downloaded history, for the feasibility check.
+    """Quick statistics over a downloaded history: count, span and cadence.
 
     Returns the count, the epoch span, and the median and worst gap between
     consecutive element sets in hours. The gap is what limits how sharply any

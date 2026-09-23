@@ -17,5 +17,5 @@ figures/
 # Space-Track credentials. Never commit these.
 .env
 
-# Internal working plan, deliberately not published.
+# Local notes.
 PLAN.md

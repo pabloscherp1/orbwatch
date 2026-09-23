@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "orbwatch"
-version = "0.0.1"
-description = "Mission design toolchain for inspecting an object already in orbit"
+version = "0.1.0"
+description = "Satellite tracking and manoeuvre detection from public orbital data"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
+authors = [{ name = "Pablo Scherpereel Arce" }]
+keywords = ["astrodynamics", "sgp4", "space domain awareness", "manoeuvre detection"]
 dependencies = [
     "numpy>=1.26",
-    "scipy>=1.11",
-    "astropy>=6.0",
     "sgp4>=2.23",
     "matplotlib>=3.8",
     # Mozilla CA bundle. The python.org macOS installer ships without a usable
@@ -21,16 +21,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# astropy is an independent reference the tests check frames and the Sun against.
 dev = [
     "pytest>=8.0",
     "ruff>=0.5",
+    "astropy>=6.0",
 ]
 
-# Notebooks are installed separately so a compiler-dependent transitive build
-# cannot block the core test environment.
-notebooks = [
-    "jupyterlab>=4.0",
-]
+[project.urls]
+Repository = "https://github.com/pabloscherp1/orbwatch"
 
 [project.scripts]
 orbwatch-gui = "orbwatch.gui.server:main"

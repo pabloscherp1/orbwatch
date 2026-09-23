@@ -18,6 +18,7 @@ requires, and compare the detected total against it. The ratio is the closure.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -29,8 +30,9 @@ from orbwatch.events.history import OrbitHistory
 LAPLACE_POLE_INCLINATION_RAD: float = float(np.deg2rad(7.4))
 """Inclination of the Laplace plane at geostationary radius, about 7.4 deg.
 
-Established in the literature on long-term GEO dynamics; confirmed through search
-summaries rather than the primary papers.
+The standard value from the literature on long-term GEO dynamics. Together with
+the 53-year period below it reproduces INTELSAT 905's measured drift to within
+9%.
 """
 
 LAPLACE_PRECESSION_PERIOD_DAYS: float = 53.0 * 365.25
@@ -72,6 +74,39 @@ def natural_inclination_rate_rad_per_day(
     return omega * np.stack([-relative[..., 1], relative[..., 0]], axis=-1)
 
 
+def natural_inclination_path_rad(
+    start_rad: ArrayLike, t_days: ArrayLike
+) -> NDArray[np.float64]:
+    """Where an uncontrolled GEO object's inclination vector would drift.
+
+    The exact solution of :func:`natural_inclination_rate_rad_per_day`: the
+    vector turns counter-clockwise about the Laplace pole at a constant rate.
+
+    Parameters
+    ----------
+    start_rad : array_like, shape (2,)
+        Inclination vector at ``t_days = 0``, radians.
+    t_days : array_like, shape (N,)
+        Times since the start, days.
+
+    Returns
+    -------
+    ndarray, shape (N, 2)
+        Inclination vector at each time, radians.
+    """
+    pole = np.array([0.0, LAPLACE_POLE_INCLINATION_RAD])
+    relative = np.asarray(start_rad, dtype=float) - pole
+    angle = 2.0 * np.pi / LAPLACE_PRECESSION_PERIOD_DAYS * np.asarray(t_days, float)
+    cos, sin = np.cos(angle), np.sin(angle)
+    return pole + np.stack(
+        [
+            cos * relative[0] - sin * relative[1],
+            sin * relative[0] + cos * relative[1],
+        ],
+        axis=-1,
+    )
+
+
 @dataclass(frozen=True)
 class Budget:
     """Detected and required speed change for one signal over a history.
@@ -107,14 +142,22 @@ def _endpoint(t: NDArray, x: NDArray, first: bool) -> NDArray:
 
 
 def in_plane_budget(
-    history: OrbitHistory, analysis: StepAnalysis, manoeuvres: list[Manoeuvre]
+    history: OrbitHistory,
+    analysis: StepAnalysis,
+    manoeuvres: list[Manoeuvre],
+    drag_surges: Sequence[Manoeuvre] = (),
 ) -> Budget:
     """In-plane budget. In low orbit, checks detected raises against drag loss.
 
     The requirement is the altitude manoeuvres must have added: the net change
-    in semi-major axis minus the natural decay. Only raising manoeuvres count
-    against it. A lowering manoeuvre is still reported as a manoeuvre, and a
-    sustained drop from a drag surge is not propellant at all.
+    in semi-major axis minus the natural decay, where natural decay is the
+    local rate over every gap plus the extra drop of any drag surge. Only
+    raising manoeuvres count against it. A lowering manoeuvre is still
+    reported as a manoeuvre.
+
+    Leaving surges out of the natural side would understate the requirement by
+    their drop: on the ISS the 19 January 2026 storm took 191 m that reboosts
+    then had to replace.
     """
     in_plane = [m for m in manoeuvres if m.kind == "in_plane"]
     if history.regime == "geosynchronous":
@@ -128,6 +171,7 @@ def in_plane_budget(
         )
     detected = sum(m.delta_v_m_s for m in in_plane if (m.delta_a_km or 0.0) > 0.0)
     natural_km = float((analysis.local_rate[:, 0] * analysis.dt_days).sum())
+    natural_km += sum(m.change[0] for m in drag_surges if m.kind == "in_plane")
     net_km = float(history.a_km[-1] - history.a_km[0])
     added_km = net_km - natural_km
     v_m_s = history.mean_speed_km_s * 1000.0
@@ -137,7 +181,8 @@ def in_plane_budget(
         history.span_days,
         detected,
         required,
-        "raises detected against net change in semi-major axis minus natural decay",
+        "raises detected against net change in semi-major axis minus natural "
+        "decay, drag surges included",
     )
 
 

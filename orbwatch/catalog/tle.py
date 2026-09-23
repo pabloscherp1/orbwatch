@@ -51,9 +51,7 @@ def tle_checksum(line: str) -> int:
     counts as zero. Plus signs, decimal points and spaces contribute nothing,
     which is why a minus sign is the only non-digit that matters.
     """
-    total = sum(
-        int(c) if c.isdigit() else (1 if c == "-" else 0) for c in line[:68]
-    )
+    total = sum(int(c) if c.isdigit() else (1 if c == "-" else 0) for c in line[:68])
     return total % 10
 
 

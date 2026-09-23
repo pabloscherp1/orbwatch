@@ -251,6 +251,4 @@ def propagate_span(
     the same; ``stop_utc`` is included only if it falls exactly on the grid.
     """
     times = time_grid(start_utc, stop_utc, step_s)
-    return propagate(
-        tle, times, on_error=on_error, stale_after_days=stale_after_days
-    )
+    return propagate(tle, times, on_error=on_error, stale_after_days=stale_after_days)

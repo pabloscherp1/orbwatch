@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 import warnings
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -34,10 +35,36 @@ from orbwatch.catalog.frames import (
 from orbwatch.catalog.propagate import StaleElementSetWarning, propagate
 from orbwatch.catalog.timescales import SECONDS_PER_DAY, require_utc, time_grid
 from orbwatch.catalog.tle import TLE
+from orbwatch.events.analysis import EventReport, analyse
+from orbwatch.events.budget import (
+    ENDPOINT_WINDOW_DAYS,
+    Budget,
+    natural_inclination_path_rad,
+)
+from orbwatch.events.detect import (
+    DEFAULT_SIGMAS,
+    FLOOR_OVERRIDE_SIGMAS,
+    Manoeuvre,
+    StepAnalysis,
+    floor_m_s,
+)
+from orbwatch.events.history import OrbitHistory
 
 MAX_TRACK_SAMPLES: int = 6000
 MAX_TRACK_HALF_SPAN_S: float = 3.0 * SECONDS_PER_DAY
 MAX_PASS_WINDOW_HOURS: float = 72.0
+MIN_BEHAVIOUR_RECORDS: int = 20
+"""Fewer element sets than this cannot give a meaningful noise estimate."""
+
+ARCSEC_PER_RAD: float = math.degrees(1.0) * 3600.0
+
+HELD_FRACTION: float = 0.3
+"""A GEO orbit plane that moved less than this share of its free drift is held."""
+
+DRIFT_MODEL_TOLERANCE: float = 0.1
+"""Relative accuracy of the Laplace-plane drift model. It came within 9% of
+INTELSAT 905's measured drift, so a containment requirement below 10% of the
+cost of undoing the free drift is indistinguishable from no control at all."""
 
 
 def _unix_ms(time: datetime) -> int:
@@ -47,6 +74,12 @@ def _unix_ms(time: datetime) -> int:
 def _clean(values: np.ndarray, decimals: int) -> list[float | None]:
     """Round and replace NaN with None, since NaN is not valid JSON."""
     return [None if not math.isfinite(v) else round(float(v), decimals) for v in values]
+
+
+def _number(value: float | None, decimals: int) -> float | None:
+    if value is None or not math.isfinite(value):
+        return None
+    return round(float(value), decimals)
 
 
 def nominal_period_min(tle: TLE) -> float:
@@ -238,4 +271,248 @@ def passes(
             }
             for p in found
         ],
+    }
+
+
+# --------------------------------------------------------------------------
+# Behaviour: the events layer, for the interface's history view
+# --------------------------------------------------------------------------
+
+
+def _event(event: Manoeuvre, status: str) -> dict[str, Any]:
+    """One detected or set-aside event. Out-of-plane change is in arcseconds,
+    signed for a scalar inclination and a magnitude for the GEO vector."""
+    if event.kind == "in_plane":
+        change = {"delta_a_km": _number(event.change[0], 4)}
+    elif len(event.change) == 1:
+        change = {"change_arcsec": _number(event.change[0] * ARCSEC_PER_RAD, 2)}
+    else:
+        size = float(np.linalg.norm(event.change)) * ARCSEC_PER_RAD
+        change = {"change_arcsec": _number(size, 2)}
+    return {
+        "status": status,
+        "kind": event.kind,
+        "profile": event.profile,
+        "start_unix_ms": _unix_ms(event.start_utc),
+        "end_unix_ms": _unix_ms(event.end_utc),
+        "window_hours": _number(event.window_hours, 2),
+        "delta_v_m_s": _number(event.delta_v_m_s, 4),
+        "significance": _number(event.significance, 1),
+        "coherence": _number(event.coherence, 3),
+        "gaps": event.gaps,
+        **change,
+    }
+
+
+def scatter_per_gap_m_s(history: OrbitHistory, analysis: StepAnalysis) -> float:
+    """The detector's per-gap scatter, one robust sigma, as a speed change.
+
+    Uses the same conversions as the manoeuvre delta-v: (v/2) |da| / a in
+    plane, v |di| out of plane. This is what a correction has to stand out
+    from, gap by gap. It is called scatter rather than noise because it is not
+    only measurement error: control applied more often than the catalogue
+    updates lands in it too. INMARSAT 5-F3, kept by daily ion thruster firings,
+    scatters 60 times more in semi-major axis than INTELSAT 905, which coasts
+    between burns weeks apart.
+    """
+    v_m_s = history.mean_speed_km_s * 1000.0
+    if analysis.kind == "in_plane":
+        return 0.5 * v_m_s * analysis.sigma / float(np.mean(history.a_km))
+    return v_m_s * analysis.sigma
+
+
+def _budget(
+    budget: Budget,
+    history: OrbitHistory,
+    analysis: StepAnalysis,
+    manoeuvres: Sequence[Manoeuvre],
+) -> dict[str, Any]:
+    """A budget, plus the comparison that says whether its corrections could
+    be seen one at a time: their typical size against the per-gap scatter.
+    Burns are impulsive manoeuvres only; a sustained event such as a drag surge
+    is not a burn."""
+    burns = [
+        m.delta_v_m_s
+        for m in manoeuvres
+        if m.kind == budget.kind and m.profile == "impulsive"
+    ]
+    gaps = int(analysis.usable.sum())
+    required = budget.required_m_s
+    return {
+        "detected_m_s": _number(budget.detected_m_s, 3),
+        "detected_per_year_m_s": _number(budget.per_year(budget.detected_m_s), 3),
+        "required_m_s": _number(required, 3),
+        "required_per_year_m_s": _number(budget.per_year(required), 3),
+        "closure": _number(budget.closure, 4),
+        "method": budget.method,
+        "burns": len(burns),
+        "typical_burn_m_s": _number(float(np.median(burns)), 4) if burns else None,
+        "scatter_per_gap_m_s": _number(scatter_per_gap_m_s(history, analysis), 5),
+        "required_per_gap_m_s": (
+            _number(required / gaps, 5) if required and gaps else None
+        ),
+    }
+
+
+def plane_control(
+    natural_displacement_rad: float,
+    observed_displacement_rad: float,
+    required_m_s: float | None,
+    speed_m_s: float,
+) -> str:
+    """Whether a GEO orbit plane was held, left free, or something between.
+
+    ``held`` when it moved less than ``HELD_FRACTION`` of its free drift.
+    ``free`` when the containment requirement is within the drift model's
+    accuracy of the cost of undoing the free drift, so it is indistinguishable
+    from no control. ``partial`` otherwise.
+    """
+    if observed_displacement_rad < HELD_FRACTION * natural_displacement_rad:
+        return "held"
+    free_drift_cost = speed_m_s * natural_displacement_rad
+    if required_m_s is not None and required_m_s <= DRIFT_MODEL_TOLERANCE * (
+        free_drift_cost
+    ):
+        return "free"
+    return "partial"
+
+
+def _detector(
+    analysis: StepAnalysis, t_days: np.ndarray, first: datetime, scale: float
+) -> dict[str, Any]:
+    """What the detector compares for each usable gap: the size of the change
+    nature cannot explain, against the threshold that flags it. Edge gaps carry
+    their own raised threshold in ``edge_threshold``, null elsewhere."""
+    usable = analysis.usable
+    midpoint_days = 0.5 * (t_days[1:] + t_days[:-1])[usable]
+    edge_threshold = np.where(analysis.edge, analysis.gap_threshold, np.nan)
+    return {
+        "unit": "m" if analysis.kind == "in_plane" else "arcsec",
+        "t_unix_ms": [
+            _unix_ms(first + timedelta(days=float(d))) for d in midpoint_days
+        ],
+        "magnitude": _clean(analysis.magnitude[usable] * scale, 3),
+        "flagged": analysis.flagged[usable].tolist(),
+        "edge_threshold": _clean(edge_threshold[usable] * scale, 3),
+        "sigma": _number(analysis.sigma * scale, 4),
+        "threshold": _number(analysis.threshold * scale, 4),
+    }
+
+
+def _natural_drift(report: EventReport) -> dict[str, Any] | None:
+    """For GEO: where the orbit plane would have gone with nobody steering it,
+    from the observed starting state, next to where it actually went."""
+    h = report.history
+    if h.regime != "geosynchronous":
+        return None
+    t, ivec = h.t_days, h.inclination_vector_rad
+    start = np.median(ivec[t <= t[0] + ENDPOINT_WINDOW_DAYS], axis=0)
+    end = np.median(ivec[t >= t[-1] - ENDPOINT_WINDOW_DAYS], axis=0)
+    days = np.linspace(0.0, h.span_days, max(2, int(h.span_days) + 1))
+    path_rad = natural_inclination_path_rad(start, days)
+    path = np.rad2deg(path_rad)
+    natural = float(np.linalg.norm(path_rad[-1] - path_rad[0]))
+    observed = float(np.linalg.norm(end - start))
+    speed_m_s = h.mean_speed_km_s * 1000.0
+    return {
+        "control": plane_control(
+            natural, observed, report.out_of_plane_budget.required_m_s, speed_m_s
+        ),
+        "free_drift_cost_m_s": _number(speed_m_s * natural, 3),
+        "t_unix_ms": [
+            _unix_ms(h.epochs_utc[0] + timedelta(days=float(d))) for d in days
+        ],
+        "ivec_x_deg": _clean(path[:, 0], 6),
+        "ivec_y_deg": _clean(path[:, 1], 6),
+        "natural_displacement_deg": _number(math.degrees(natural), 5),
+        "observed_displacement_deg": _number(math.degrees(observed), 5),
+    }
+
+
+def behaviour(records: Sequence[TLE], sigmas: float = DEFAULT_SIGMAS) -> dict[str, Any]:
+    """An object's history, manoeuvres, set-aside events and budgets.
+
+    Parameters
+    ----------
+    records : sequence of TLE
+        Element set history for one object, e.g. from Space-Track.
+    sigmas : float, optional
+        Detection threshold in robust standard deviations.
+
+    Returns
+    -------
+    dict
+        ``series`` holds the cleaned history as parallel arrays. ``detector``
+        holds, per signal, the per-gap change nature cannot explain and the
+        threshold it is compared with. ``events`` lists manoeuvres and, marked by
+        ``status``, the events set aside and why. ``natural`` is the free drift
+        of the orbit plane at GEO and null elsewhere.
+
+    Raises
+    ------
+    ValueError
+        With fewer than ``MIN_BEHAVIOUR_RECORDS`` element sets.
+    """
+    if len(records) < MIN_BEHAVIOUR_RECORDS:
+        raise ValueError(
+            f"only {len(records)} element sets in the window; at least "
+            f"{MIN_BEHAVIOUR_RECORDS} are needed to separate burns from noise"
+        )
+    report = analyse(records, sigmas=sigmas)
+    h = report.history
+    q = h.quality
+    ivec_deg = np.rad2deg(h.inclination_vector_rad)
+
+    events = [_event(m, "manoeuvre") for m in report.manoeuvres]
+    for status, group in (
+        ("drag_surge", report.drag_surges),
+        ("below_floor", report.below_floor),
+        ("incoherent", report.incoherent),
+        ("excursion", report.excursions),
+    ):
+        events += [_event(m, status) for m in group]
+    events.sort(key=lambda e: e["start_unix_ms"])
+
+    return {
+        "norad_id": h.norad_id,
+        "regime": h.regime,
+        "start_unix_ms": _unix_ms(h.epochs_utc[0]),
+        "stop_unix_ms": _unix_ms(h.epochs_utc[-1]),
+        "span_days": _number(h.span_days, 3),
+        "sigmas": sigmas,
+        "quality": {
+            "records_in": q.records_in,
+            "refits_merged": q.refits_merged,
+            "transients_rejected": q.transients_rejected,
+            "used": len(h),
+        },
+        "series": {
+            "t_unix_ms": [_unix_ms(t) for t in h.epochs_utc],
+            "a_km": _clean(h.a_km, 4),
+            "inclination_deg": _clean(np.rad2deg(h.inclination_rad), 6),
+            "ivec_x_deg": _clean(ivec_deg[:, 0], 6),
+            "ivec_y_deg": _clean(ivec_deg[:, 1], 6),
+        },
+        "rejected_unix_ms": [_unix_ms(t) for t in q.transient_epochs_utc],
+        "detector": {
+            "in_plane": _detector(report.in_plane, h.t_days, h.epochs_utc[0], 1000.0),
+            "out_of_plane": _detector(
+                report.out_of_plane, h.t_days, h.epochs_utc[0], ARCSEC_PER_RAD
+            ),
+        },
+        "floors_m_s": {
+            "in_plane": floor_m_s("in_plane", h.regime),
+            "out_of_plane": floor_m_s("out_of_plane", h.regime),
+        },
+        "floor_override_sigmas": dict(FLOOR_OVERRIDE_SIGMAS),
+        "events": events,
+        "budgets": {
+            "in_plane": _budget(
+                report.in_plane_budget, h, report.in_plane, report.manoeuvres
+            ),
+            "out_of_plane": _budget(
+                report.out_of_plane_budget, h, report.out_of_plane, report.manoeuvres
+            ),
+        },
+        "natural": _natural_drift(report),
     }

@@ -33,6 +33,11 @@
       </select>
     </form>
 
+    <div class="view-switch" role="tablist" aria-label="Main view">
+      <button data-view="globe" class="on" title="Live globe (B toggles)">GLOBE</button>
+      <button data-view="behaviour" title="Element set history, manoeuvres and budgets (B toggles)">BEHAVIOUR</button>
+    </div>
+
     <div class="status">
       <span id="status-mode" class="pill pill-live">LIVE</span>
       <span id="status-age" class="pill">TLE --</span>
@@ -65,12 +70,67 @@
       <div id="toast" class="toast" role="status" aria-live="polite"></div>
     </section>
 
+    <section class="behaviour-wrap" id="behaviour-wrap" hidden>
+      <div class="bh-toolbar">
+        <div class="bh-heading">
+          <div class="hud-title" id="bh-name">--</div>
+          <div class="hud-line" id="bh-sub"></div>
+        </div>
+        <div class="bh-controls">
+          <label>SPAN
+            <select id="bh-days">
+              <option value="90">90 D</option>
+              <option value="180">180 D</option>
+              <option value="365" selected>1 YR</option>
+              <option value="730">2 YR</option>
+            </select>
+          </label>
+          <label title="Lower is more sensitive and lets in more noise. At 3σ Hubble, which has no engine, shows two false plane-change burns.">THRESHOLD
+            <select id="bh-sigmas">
+              <option value="3">3σ</option>
+              <option value="4">4σ</option>
+              <option value="5" selected>5σ</option>
+              <option value="6">6σ</option>
+            </select>
+          </label>
+          <div class="segmented" id="bh-detector" title="Which signal the detector panel shows">
+            <button data-kind="in_plane">IN-PLANE</button>
+            <button data-kind="out_of_plane">OUT-OF-PLANE</button>
+          </div>
+          <label class="check"><input type="checkbox" id="bh-setaside">SET ASIDE</label>
+          <label class="check"><input type="checkbox" id="bh-rejected" checked>REJECTED</label>
+          <button class="btn-ghost btn-small" id="bh-reset" title="Show the whole span (double-click the chart)">RESET</button>
+        </div>
+      </div>
+
+      <div class="bh-charts" id="bh-charts">
+        <div id="bh-tooltip" class="bh-tooltip" hidden></div>
+        <div id="bh-message" class="bh-message" hidden></div>
+        <div id="bh-loading" class="loading hidden"><span>ANALYSING ELEMENT SET HISTORY</span></div>
+      </div>
+
+      <div class="bh-footer">
+        <div class="legend">
+          <span class="chip"><i class="sw sw-impulsive"></i>IMPULSIVE</span>
+          <span class="chip"><i class="sw sw-sustained"></i>SUSTAINED</span>
+          <span class="chip"><i class="sw sw-drag"></i>DRAG SURGE</span>
+          <span class="chip"><i class="sw sw-aside"></i>SET ASIDE</span>
+          <span class="chip"><i class="sw sw-rug"></i>REJECTED ELEMENT SET</span>
+          <span class="chip"><i class="sw sw-threshold"></i>DETECTION THRESHOLD</span>
+          <span class="chip"><i class="sw sw-flag"></i>FLAGGED GAP</span>
+          <span class="chip"><i class="sw sw-flag-aside"></i>FLAGGED, SET ASIDE</span>
+        </div>
+        <div class="hint">SCROLL ZOOM · DRAG PAN · DOUBLE-CLICK RESET · CLICK A BAND</div>
+      </div>
+    </section>
+
     <aside class="panel">
       <nav class="tabs" role="tablist">
         <button class="tab active" data-tab="telemetry" role="tab">TELEMETRY</button>
         <button class="tab" data-tab="passes" role="tab">PASSES</button>
         <button class="tab" data-tab="elements" role="tab">ELEMENTS</button>
         <button class="tab" data-tab="setup" role="tab">SETUP</button>
+        <button class="tab" data-tab="events" role="tab">EVENTS</button>
       </nav>
 
       <!-- TELEMETRY -->
@@ -166,7 +226,52 @@
         <div class="section-title">KEYS</div>
         <div class="keys">
           <span><kbd>Space</kbd> pause</span><span><kbd>←</kbd><kbd>→</kbd> rate</span>
-          <span><kbd>L</kbd> live</span><span><kbd>F</kbd> follow</span><span><kbd>1</kbd>-<kbd>4</kbd> tabs</span>
+          <span><kbd>L</kbd> live</span><span><kbd>F</kbd> follow</span><span><kbd>B</kbd> behaviour</span><span><kbd>1</kbd>-<kbd>5</kbd> tabs</span>
+        </div>
+      </div>
+
+      <!-- EVENTS -->
+      <div class="tab-body" id="tab-events">
+        <div class="section-title">HISTORY <span class="note" id="ev-span"></span></div>
+        <p class="footnote" id="ev-status"></p>
+        <div id="ev-content" hidden>
+          <div class="grid-rows" id="ev-quality"></div>
+
+          <div class="section-title">DELTA-V BUDGET <span class="note">DETECTED VS PHYSICS</span></div>
+          <div id="ev-budgets"></div>
+
+          <div id="ev-plane-section" hidden>
+            <div class="section-title">ORBIT PLANE
+              <span class="note segmented" id="ev-plane-fit">
+                <button data-fit="nature">FIT BOTH</button><button data-fit="observed">FIT SATELLITE</button>
+              </span>
+            </div>
+            <div id="ev-plane" class="ev-plane" aria-label="Inclination vector: observed path against uncontrolled drift"></div>
+            <p class="footnote" id="ev-plane-caption"></p>
+          </div>
+
+          <div class="section-title">MANOEUVRES <span class="note" id="ev-count"></span></div>
+          <div class="table-wrap">
+            <table class="passes events">
+              <thead><tr><th>DATE</th><th>AXIS</th><th>CHANGE</th><th>ΔV M/S</th><th>σ</th></tr></thead>
+              <tbody id="ev-body"></tbody>
+            </table>
+          </div>
+
+          <div id="ev-surge-section" hidden>
+            <div class="section-title">DRAG SURGES <span class="note">NATURAL, NOT BURNS</span></div>
+            <div class="table-wrap">
+              <table class="passes events">
+                <thead><tr><th>DATE</th><th>DAYS</th><th>EXTRA DROP</th><th>σ</th></tr></thead>
+                <tbody id="ev-surges"></tbody>
+              </table>
+            </div>
+            <p class="footnote">Decay faster than the days before, spread over several updates: extra drag, usually a geomagnetic storm heating the upper atmosphere. The G4 storm of 19 January 2026 shows on every low orbit at once. Counted as drag in the budget.</p>
+          </div>
+
+          <div class="section-title">SET ASIDE <span class="note">NOT COUNTED</span></div>
+          <div class="grid-rows" id="ev-aside"></div>
+          <p class="footnote">Below floor: both smaller and less significant than the worst fit noise seen on satellites that cannot manoeuvre; an event at 30σ in plane or 100σ out of plane is kept whatever its size. Incoherent: steps that cancel, a bad fit rather than a burn. Excursions: a jump undone within 10 days. Tick SET ASIDE above the charts to see them.</p>
         </div>
       </div>
     </aside>
