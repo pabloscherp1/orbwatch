@@ -12,7 +12,7 @@ import threading
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import numpy as np
 import pytest
@@ -259,6 +259,61 @@ def test_behaviour_refuses_a_history_too_short_to_measure_noise() -> None:
         api.behaviour(leo_history()[:5])
 
 
+MISSION_EPOCH = datetime(2026, 9, 24, tzinfo=UTC)
+
+
+def sso_target() -> TLE:
+    """An ENVISAT-like target: 761.5 km, 98.39 deg, not quite sun-synchronous."""
+    a_km = 6378.137 + 761.5
+    n_rev_day = np.sqrt(398600.4418 / a_km**3) * 86400.0 / (2.0 * np.pi)
+    return parse_tle(
+        build_line1(norad_id=27386, epoch_day=267.0),
+        build_line2(
+            norad_id=27386,
+            inclination_deg=98.39,
+            raan_deg=216.43,
+            eccentricity_field="0001238",
+            argp_deg=90.0,
+            mean_anomaly_deg=75.0,
+            mean_motion_rev_per_day=float(n_rev_day),
+        ),
+        name="SSO TARGET",
+    )
+
+
+def test_mission_payload_is_a_real_trade_with_a_budget_for_every_option() -> None:
+    payload = api.mission(sso_target(), MISSION_EPOCH)
+    json.dumps(payload, allow_nan=False)
+    options = payload["options"]
+    days = [o["total_days"] for o in options]
+    transfer = [o["transfer_m_s"] for o in options]
+
+    assert days == sorted(days) and transfer == sorted(transfer, reverse=True)
+    assert min(transfer) >= payload["floor_m_s"] - 1e-6
+    assert payload["direct_m_s"] > 5 * min(transfer)
+    assert payload["warning"] is None
+    assert payload["gap"]["raan_deg"] == pytest.approx(15.0, abs=0.01)
+    assert any(o["total_days"] <= payload["default_budget_days"] for o in options)
+    for option in options:
+        assert len(option["lines"]) == len(payload["lines"]) == len(option["basis"])
+        assert option["dv_margined_m_s"] > option["dv_nominal_m_s"]
+        assert option["arrival_unix_ms"] > payload["epoch_unix_ms"]
+
+
+def test_mission_warns_about_inclination_and_refuses_geostationary_targets(
+    iss_like: TLE,
+) -> None:
+    assert "inclination" in api.mission(iss_like, MISSION_EPOCH)["warning"]
+    geo = parse_tle(
+        build_line1(norad_id=40882),
+        build_line2(
+            norad_id=40882, inclination_deg=0.02, mean_motion_rev_per_day=1.00271
+        ),
+    )
+    with pytest.raises(ValueError, match="low-orbit targets"):
+        api.mission(geo, MISSION_EPOCH)
+
+
 # --------------------------------------------------------------------------
 # Server
 # --------------------------------------------------------------------------
@@ -386,6 +441,18 @@ def test_behaviour_endpoint_analyses_once_and_then_serves_from_memory(
 
     get(f"{server_url}/api/behaviour?norad=25544&days=90&sigmas=6")
     assert len(history.calls) == 2, "a different threshold is a different analysis"
+
+
+def test_mission_endpoint_validates_parameters_and_caches(server_url: str) -> None:
+    url = f"{server_url}/api/mission?norad=25544&altitude=550&isp=300"
+    first, second = get(url), get(url)
+    assert first[0] == second[0] == 200 and first[1] == second[1]
+    payload = json.loads(first[1])
+    assert payload["dropoff"]["altitude_km"] == pytest.approx(550.0, abs=0.01)
+    assert payload["spacecraft"]["isp_s"] == 300.0
+
+    code, body, _ = get(f"{server_url}/api/mission?norad=25544&altitude=50")
+    assert code == 400 and "altitude" in json.loads(body)["error"]
 
 
 def test_index_page_is_served(server_url: str) -> None:

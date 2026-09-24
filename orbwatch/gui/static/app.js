@@ -9,6 +9,7 @@
  */
 
 import { createBehaviourView } from "./behaviour.js";
+import { createMissionView } from "./mission.js";
 
 const d3 = window.d3;
 const topojson = window.topojson;
@@ -243,6 +244,7 @@ async function loadObject(norad) {
     $("norad-input").value = norad;
     renderElements();
     behaviour.setObject(norad, object.name);
+    mission.setObject(norad, object.name);
   } catch (error) {
     toast(`Could not load NORAD ${norad}: ${error.message}`);
     if (!state.object) $("loading").querySelector("span").textContent = "NO ELEMENT SET LOADED";
@@ -1018,17 +1020,19 @@ function renderElements() {
 // Setup and interaction
 // ---------------------------------------------------------------------------
 
-const TABS = ["telemetry", "passes", "elements", "setup", "events"];
+const TABS = ["telemetry", "passes", "elements", "setup", "events", "mission"];
+const VIEW_TAB = { behaviour: "events", mission: "mission" };
 
 function selectTab(name) {
   for (const tab of document.querySelectorAll(".tab")) tab.classList.toggle("active", tab.dataset.tab === name);
   for (const body of document.querySelectorAll(".tab-body")) body.classList.toggle("active", body.id === `tab-${name}`);
   if (name === "events" && state.mainView !== "behaviour") setMainView("behaviour");
+  if (name === "mission" && state.mainView !== "mission") setMainView("mission");
 }
 
 function updateHash() {
   if (state.norad === null) return;
-  const view = state.mainView === "behaviour" ? "&view=behaviour" : "";
+  const view = state.mainView === "globe" ? "" : `&view=${state.mainView}`;
   history.replaceState(null, "", `#norad=${state.norad}${view}`);
 }
 
@@ -1036,16 +1040,16 @@ function setMainView(name) {
   state.mainView = name;
   $("globe-wrap").hidden = name !== "globe";
   $("behaviour-wrap").hidden = name !== "behaviour";
+  $("mission-wrap").hidden = name !== "mission";
   for (const button of document.querySelectorAll(".view-switch button")) {
     button.classList.toggle("on", button.dataset.view === name);
   }
-  if (name === "globe") {
-    behaviour.deactivate();
-    resize();
-  } else {
-    behaviour.activate();
-    selectTab("events");
-  }
+  if (name === "behaviour") behaviour.activate();
+  else behaviour.deactivate();
+  if (name === "mission") mission.activate();
+  else mission.deactivate();
+  if (name === "globe") resize();
+  else selectTab(VIEW_TAB[name]);
   updateHash();
 }
 
@@ -1053,6 +1057,13 @@ const behaviour = createBehaviourView({
   getJSON,
   onShowRequested: () => {
     if (state.mainView !== "behaviour") setMainView("behaviour");
+  },
+});
+
+const mission = createMissionView({
+  getJSON,
+  onShowRequested: () => {
+    if (state.mainView !== "mission") setMainView("mission");
   },
 });
 
@@ -1168,8 +1179,9 @@ function setupControls() {
     else if (key === "arrowleft") actions.slower();
     else if (key === "l") actions.live();
     else if (key === "f") state.view.follow = !state.view.follow;
-    else if (key === "b") setMainView(state.mainView === "globe" ? "behaviour" : "globe");
-    else if (["1", "2", "3", "4", "5"].includes(key)) selectTab(TABS[Number(key) - 1]);
+    else if (key === "b") setMainView(state.mainView === "behaviour" ? "globe" : "behaviour");
+    else if (key === "m") setMainView(state.mainView === "mission" ? "globe" : "mission");
+    else if (["1", "2", "3", "4", "5", "6"].includes(key)) selectTab(TABS[Number(key) - 1]);
   });
 
   let last = null;
@@ -1211,7 +1223,8 @@ async function loadGeography() {
 
 function followHash() {
   const norad = /norad=(\d+)/.exec(window.location.hash);
-  const view = /view=behaviour/.test(window.location.hash) ? "behaviour" : "globe";
+  const found = /view=(behaviour|mission)/.exec(window.location.hash);
+  const view = found ? found[1] : "globe";
   if (view !== state.mainView) setMainView(view);
   if (norad && Number(norad[1]) !== state.norad) loadObject(Number(norad[1]));
 }
@@ -1230,7 +1243,8 @@ async function main() {
 
   window.addEventListener("hashchange", followHash);
   const fromHash = /norad=(\d+)/.exec(window.location.hash);
-  if (/view=behaviour/.test(window.location.hash)) setMainView("behaviour");
+  const startView = /view=(behaviour|mission)/.exec(window.location.hash);
+  if (startView) setMainView(startView[1]);
   await loadObject(fromHash ? Number(fromHash[1]) : OBJECT_PRESETS[0].norad);
 }
 

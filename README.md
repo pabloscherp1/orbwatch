@@ -52,10 +52,12 @@ margins.
   propellant
 
 **Tracker**
-- A local browser interface: live globe with ground track, footprint, station
-  horizon and passes, and a behaviour view of an object's history, manoeuvres
-  and budgets. Every number comes from the tested Python modules; the browser
-  only draws.
+- A local browser interface with three views of the selected object: a live
+  globe with ground track, footprint, station horizon and passes; its
+  behaviour, with history, manoeuvres, budgets and pattern of life; and a
+  mission plan to reach it, where the time budget, the drop-off and the
+  spacecraft can be changed and the time against delta-v trade updates live.
+  Every number comes from the tested Python modules; the browser only draws.
 
 <p>
   <img src="docs/tracker.png" width="49%" alt="Live tracker: ISS ground track, footprint and pass prediction">

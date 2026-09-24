@@ -26,6 +26,8 @@ from orbwatch.access.lighting import (
     sun_position_km,
 )
 from orbwatch.access.passes import GroundSite, find_passes, horizon_half_angle_rad
+from orbwatch.budget.budget import MARGINS, REQUIREMENTS, build_budget
+from orbwatch.budget.budget import REFERENCE as BUDGET_REFERENCE
 from orbwatch.catalog.frames import (
     ecef_to_geodetic,
     look_angles,
@@ -54,6 +56,21 @@ from orbwatch.events.pattern import (
     east_west_burns,
     longitude_deg,
     pattern_of_life,
+)
+from orbwatch.transfer.j2 import EARTH_RADIUS_KM
+from orbwatch.transfer.manoeuvres import hohmann
+from orbwatch.transfer.mission import (
+    CircularOrbit,
+    MissionAssumptions,
+    RendezvousPlan,
+    budget_items,
+    direct_transfer,
+    drift_options,
+    local_time_of_ascending_node_h,
+    orbit_from_tle,
+    pareto_front,
+    sun_synchronous_orbit,
+    terminal_approach,
 )
 
 MAX_TRACK_SAMPLES: int = 6000
@@ -612,3 +629,183 @@ def behaviour(records: Sequence[TLE], sigmas: float = DEFAULT_SIGMAS) -> dict[st
         "natural": _natural_drift(report),
         "pattern": _pattern(report),
     }
+
+
+# --------------------------------------------------------------------------
+# Mission: rendezvous planning, for the interface's mission view
+# --------------------------------------------------------------------------
+
+MISSION_MAX_TARGET_ALTITUDE_KM: float = 2000.0
+"""The planner starts from a sun-synchronous rideshare and uses J2 to line up
+planes, which only makes sense for low-orbit targets."""
+
+MISSION_SHOWN_DAYS: float = 730.0
+MISSION_DEFAULT_BUDGET_DAYS: float = 180.0
+INCLINATION_WARNING_DEG: float = 5.0
+
+
+def mission(
+    tle: TLE,
+    epoch_utc: datetime,
+    dropoff_altitude_km: float = 525.0,
+    ltan_offset_h: float = -1.0,
+    dry_mass_kg: float = 150.0,
+    isp_s: float = 220.0,
+    assumptions: MissionAssumptions | None = None,
+) -> dict[str, Any]:
+    """The whole rendezvous trade for one target, with a budget for every option.
+
+    Every option on the time against delta-v front comes with its complete
+    budget, so the interface can move along the front without asking again.
+
+    Raises
+    ------
+    ValueError
+        For targets above ``MISSION_MAX_TARGET_ALTITUDE_KM``.
+    """
+    assumptions = assumptions or MissionAssumptions()
+    epoch = require_utc(epoch_utc)
+    target = orbit_from_tle(tle)
+    if target.altitude_km > MISSION_MAX_TARGET_ALTITUDE_KM:
+        raise ValueError(
+            f"{tle.name or 'This object'} is at {target.altitude_km:,.0f} km. Mission"
+            " planning starts from a sun-synchronous rideshare and uses J2 to line up"
+            " orbit planes, which only works for low-orbit targets."
+        )
+    target_now = target.at(epoch)
+    ltan_target = local_time_of_ascending_node_h(target, epoch)
+    dropoff = sun_synchronous_orbit(
+        dropoff_altitude_km, (ltan_target + ltan_offset_h) % 24.0, epoch
+    )
+    front = [
+        o
+        for o in pareto_front(drift_options(dropoff, target))
+        if o.total_days <= MISSION_SHOWN_DAYS
+    ]
+    if not front:
+        raise ValueError("no drift orbit lines up the planes within two years")
+    approach = terminal_approach(target_now)
+    direct = direct_transfer(dropoff, target)
+    delta_i = target.inclination_rad - dropoff.inclination_rad
+    floor = hohmann(dropoff.a_km, target.a_km, delta_i)
+    gap = float(np.rad2deg(_wrap(target_now.raan_rad - dropoff.raan_rad)))
+
+    warning = None
+    if abs(np.rad2deg(delta_i)) > INCLINATION_WARNING_DEG:
+        warning = (
+            f"The drop-off is sun-synchronous, {abs(np.rad2deg(delta_i)):.0f} deg of"
+            " inclination away from this target. J2 turns orbit planes about the"
+            " pole but cannot change inclination, so that difference is paid in"
+            " full. A rideshare to the target's own inclination would be needed."
+        )
+
+    options = []
+    labels: list[str] = []
+    categories: list[str] = []
+    for option in front:
+        plan = RendezvousPlan(
+            dropoff=dropoff,
+            target=target_now,
+            delta_raan_rad=np.deg2rad(gap),
+            delta_inclination_rad=delta_i,
+            max_days=option.total_days,
+            chosen=option,
+            front=(),
+            direct=direct,
+            approach=approach,
+        )
+        items = budget_items(plan, assumptions)
+        budget = build_budget(items, dry_mass_kg, isp_s)
+        labels = [i.label for i in items]
+        categories = [i.category for i in items]
+        drift = CircularOrbit(
+            EARTH_RADIUS_KM + option.altitude_km,
+            option.inclination_rad,
+            dropoff.raan_rad,
+            epoch,
+        )
+        closing = np.rad2deg(target.nodal_rate_rad_s - drift.nodal_rate_rad_s) * 86400
+        options.append(
+            {
+                "total_days": _number(option.total_days, 3),
+                "wait_days": _number(option.wait_days, 3),
+                "phasing_days": _number(option.phasing_days, 3),
+                "altitude_km": _number(option.altitude_km, 1),
+                "inclination_deg": _number(np.rad2deg(option.inclination_rad), 4),
+                "enter_m_s": _number(option.enter.dv_km_s * 1000, 2),
+                "leave_m_s": _number(option.leave.dv_km_s * 1000, 2),
+                "transfer_m_s": _number(option.dv_km_s * 1000, 2),
+                "gap_rate_deg_per_day": _number(closing, 6),
+                "arrival_unix_ms": _unix_ms(plan.arrival_utc),
+                "lines": [
+                    [_number(i.dv_m_s, 2), _number(i.dv_with_margin_m_s, 2)]
+                    for i in items
+                ],
+                "basis": [i.basis for i in items],
+                "dv_nominal_m_s": _number(budget.dv_nominal_m_s, 2),
+                "dv_margined_m_s": _number(budget.dv_with_margins_m_s, 2),
+                "propellant_kg": _number(budget.propellant_kg, 2),
+                "wet_mass_kg": _number(budget.wet_mass_kg, 2),
+            }
+        )
+    dry_margined = build_budget([], dry_mass_kg, isp_s).dry_mass_kg
+    return {
+        "target": {
+            "norad_id": tle.norad_id,
+            "name": tle.name or f"NORAD {tle.norad_id}",
+            "altitude_km": _number(target.altitude_km, 2),
+            "inclination_deg": _number(np.rad2deg(target.inclination_rad), 4),
+            "ltan_h": _number(ltan_target, 4),
+        },
+        "dropoff": {
+            "altitude_km": _number(dropoff.altitude_km, 2),
+            "inclination_deg": _number(np.rad2deg(dropoff.inclination_rad), 4),
+            "ltan_h": _number(local_time_of_ascending_node_h(dropoff, epoch), 4),
+            "ltan_offset_h": ltan_offset_h,
+        },
+        "epoch_unix_ms": _unix_ms(epoch),
+        "gap": {
+            "raan_deg": _number(gap, 4),
+            "inclination_deg": _number(np.rad2deg(delta_i), 4),
+        },
+        "direct_m_s": _number(direct.dv_km_s * 1000, 1),
+        "floor_m_s": _number(floor.dv_km_s * 1000, 2),
+        "approach": {
+            "dv_m_s": _number(approach.dv_km_s * 1000, 3),
+            "minutes": _number(approach.time_of_flight_s / 60, 1),
+            "far_km": approach.far_km,
+            "hold_km": approach.hold_km,
+        },
+        "warning": warning,
+        "lines": [
+            {
+                "label": label,
+                "category": category,
+                "margin": MARGINS[category],
+                "requirement": REQUIREMENTS[category],
+            }
+            for label, category in zip(labels, categories, strict=True)
+        ],
+        "options": options,
+        "default_budget_days": MISSION_DEFAULT_BUDGET_DAYS,
+        "spacecraft": {
+            "dry_mass_kg": dry_mass_kg,
+            "dry_mass_with_margin_kg": _number(dry_margined, 2),
+            "isp_s": isp_s,
+        },
+        "assumptions": {
+            "injection_altitude_error_km": assumptions.injection_altitude_error_km,
+            "injection_inclination_error_deg": (
+                assumptions.injection_inclination_error_deg
+            ),
+            "proximity_allocation_m_s": assumptions.proximity_allocation_m_s,
+            "operations_days": assumptions.operations_days,
+            "disposal_perigee_km": assumptions.disposal_perigee_km,
+        },
+        "reference": BUDGET_REFERENCE,
+        "model": "mean J2 dynamics, circular orbits, impulsive burns, no drag",
+    }
+
+
+def _wrap(angle_rad: float) -> float:
+    return float((angle_rad + np.pi) % (2.0 * np.pi) - np.pi)

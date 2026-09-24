@@ -7,6 +7,8 @@ Standard library only. It serves the static interface and a small JSON API:
     GET /api/track?norad=&t=&before=&after=&step=&lat=&lon=&alt=&site=&mask=
     GET /api/passes?norad=&t=&hours=&lat=&lon=&alt=&site=&mask=
     GET /api/behaviour?norad=&days=&sigmas=
+    GET /api/mission?norad=&altitude=&offset=&dry=&isp=&inj_alt=&inj_inc=&prox=&ops=
+        &disposal=
 
 Run it with ``python -m orbwatch.gui`` or ``orbwatch-gui``.
 
@@ -47,6 +49,7 @@ from orbwatch.catalog.spacetrack import (
 )
 from orbwatch.catalog.tle import TLE, TleFormatError
 from orbwatch.gui import api
+from orbwatch.transfer.mission import MissionAssumptions
 
 STATIC_DIR: Path = Path(__file__).parent / "static"
 DEFAULT_CACHE_DIR: Path = Path.home() / ".cache" / "orbwatch"
@@ -55,6 +58,20 @@ DEFAULT_HISTORY_DAYS: int = 365
 HISTORY_DAYS_RANGE: tuple[int, int] = (14, 1095)
 SIGMAS_RANGE: tuple[float, float] = (3.0, 10.0)
 BEHAVIOUR_CACHE_SIZE: int = 16
+MISSION_CACHE_SIZE: int = 32
+
+MISSION_PARAMETERS: dict[str, tuple[str, float, float, float]] = {
+    "altitude": ("dropoff_altitude_km", 525.0, 300.0, 1200.0),
+    "offset": ("ltan_offset_h", -1.0, -6.0, 6.0),
+    "dry": ("dry_mass_kg", 150.0, 1.0, 10000.0),
+    "isp": ("isp_s", 220.0, 30.0, 500.0),
+    "inj_alt": ("injection_altitude_error_km", 10.0, 0.0, 100.0),
+    "inj_inc": ("injection_inclination_error_deg", 0.1, 0.0, 2.0),
+    "prox": ("proximity_allocation_m_s", 10.0, 0.0, 500.0),
+    "ops": ("operations_days", 90.0, 0.0, 3650.0),
+    "disposal": ("disposal_perigee_km", 300.0, 100.0, 1000.0),
+}
+"""Query name: (argument, default, minimum, maximum)."""
 
 TleProvider = Callable[[int], TLE]
 HistoryProvider = Callable[[int, date, date], Sequence[TLE]]
@@ -195,16 +212,22 @@ class TrackerRequestHandler(SimpleHTTPRequestHandler):
 
     tle_provider: TleProvider
     behaviour: BehaviourService
+    mission_cache: OrderedDict[Any, dict[str, Any]]
+    mission_cache_lock: threading.Lock
 
     def __init__(
         self,
         *args: Any,
         tle_provider: TleProvider,
         behaviour: BehaviourService,
+        mission_cache: OrderedDict[Any, dict[str, Any]],
+        mission_cache_lock: threading.Lock,
         **kwargs: Any,
     ) -> None:
         self.tle_provider = tle_provider
         self.behaviour = behaviour
+        self.mission_cache = mission_cache
+        self.mission_cache_lock = mission_cache_lock
         super().__init__(*args, directory=str(STATIC_DIR), **kwargs)
 
     # -- static ------------------------------------------------------------
@@ -276,7 +299,51 @@ class TrackerRequestHandler(SimpleHTTPRequestHandler):
                 raise ApiError(HTTPStatus.BAD_REQUEST, str(error)) from error
         if path == "/api/behaviour":
             return self._behaviour(query)
+        if path == "/api/mission":
+            return self._mission(query)
         raise ApiError(HTTPStatus.NOT_FOUND, f"no such endpoint {path}")
+
+    def _mission(self, query: dict[str, list[str]]) -> dict[str, Any]:
+        norad_id = _norad(query)
+        values: dict[str, float] = {}
+        for name, (argument, default, low, high) in MISSION_PARAMETERS.items():
+            value = _float(query, name, default)
+            if not low <= value <= high:
+                raise ApiError(
+                    HTTPStatus.BAD_REQUEST, f"'{name}' must be in [{low:g}, {high:g}]"
+                )
+            values[argument] = value
+        epoch = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+        key = (norad_id, epoch, tuple(sorted(values.items())))
+        with self.mission_cache_lock:
+            if key in self.mission_cache:
+                self.mission_cache.move_to_end(key)
+                return self.mission_cache[key]
+        tle = self._tle(norad_id)
+        assumptions = MissionAssumptions(
+            **{
+                k: v
+                for k, v in values.items()
+                if k in MissionAssumptions.__dataclass_fields__
+            }
+        )
+        try:
+            result = api.mission(
+                tle,
+                epoch,
+                dropoff_altitude_km=values["dropoff_altitude_km"],
+                ltan_offset_h=values["ltan_offset_h"],
+                dry_mass_kg=values["dry_mass_kg"],
+                isp_s=values["isp_s"],
+                assumptions=assumptions,
+            )
+        except ValueError as error:
+            raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, str(error)) from error
+        with self.mission_cache_lock:
+            self.mission_cache[key] = result
+            while len(self.mission_cache) > MISSION_CACHE_SIZE:
+                self.mission_cache.popitem(last=False)
+        return result
 
     def _behaviour(self, query: dict[str, list[str]]) -> dict[str, Any]:
         norad_id = _norad(query)
@@ -353,6 +420,8 @@ def create_server(
         TrackerRequestHandler,
         tle_provider=tle_provider,
         behaviour=BehaviourService(history_provider),
+        mission_cache=OrderedDict(),
+        mission_cache_lock=threading.Lock(),
     )
     return ThreadingHTTPServer((host, port), handler)
 
