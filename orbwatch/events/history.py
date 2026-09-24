@@ -29,6 +29,7 @@ from typing import Literal
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
+from orbwatch.catalog.frames import gmst_rad
 from orbwatch.catalog.tle import TLE
 
 MU_WGS72_KM3_S2: float = 398600.8
@@ -229,6 +230,10 @@ class OrbitHistory:
         Decides which out-of-plane signal is meaningful.
     quality : DataQuality
     mu_km3_s2 : float
+    mean_longitude_rad : ndarray, shape (N,), or None
+        Mean geographic longitude at GEO, RAAN + argument of perigee + mean
+        anomaly - GMST, wrapped to (-pi, pi]. None outside GEO, where it turns
+        through a full circle every orbit and means nothing.
     """
 
     norad_id: int
@@ -240,6 +245,7 @@ class OrbitHistory:
     regime: Regime
     quality: DataQuality
     mu_km3_s2: float = MU_WGS72_KM3_S2
+    mean_longitude_rad: NDArray[np.float64] | None = None
 
     def __len__(self) -> int:
         return len(self.epochs_utc)
@@ -333,6 +339,11 @@ def build_history(
     )
     kept_epochs = tuple(e for e, k in zip(epochs, keep, strict=True) if k)
     t_kept = t[keep] - t[keep][0] if keep.any() else t[keep]
+    longitude = None
+    if regime == "geosynchronous" and kept_epochs:
+        kept = [r for r, k in zip(merged, keep, strict=True) if k]
+        angle = np.array([r.raan_rad + r.argp_rad + r.mean_anomaly_rad for r in kept])
+        longitude = np.angle(np.exp(1j * (angle - gmst_rad(kept_epochs))))
     return OrbitHistory(
         norad_id=ids.pop(),
         epochs_utc=kept_epochs,
@@ -342,4 +353,5 @@ def build_history(
         inclination_vector_rad=ivec[keep],
         regime=regime,
         quality=quality,
+        mean_longitude_rad=longitude,
     )

@@ -49,6 +49,12 @@ from orbwatch.events.detect import (
     floor_m_s,
 )
 from orbwatch.events.history import OrbitHistory
+from orbwatch.events.pattern import (
+    Score,
+    east_west_burns,
+    longitude_deg,
+    pattern_of_life,
+)
 
 MAX_TRACK_SAMPLES: int = 6000
 MAX_TRACK_HALF_SPAN_S: float = 3.0 * SECONDS_PER_DAY
@@ -429,6 +435,95 @@ def _natural_drift(report: EventReport) -> dict[str, Any] | None:
     }
 
 
+def _score(score: Score) -> dict[str, Any]:
+    return {
+        "median_abs_days": _number(score.median_abs_days, 3),
+        "mean_abs_days": _number(score.mean_abs_days, 3),
+        "within_one_day": _number(score.within_one_day, 3),
+        "bias_days": _number(score.bias_days, 3),
+    }
+
+
+def _pattern(report: EventReport) -> dict[str, Any] | None:
+    """East-west pattern of life at GEO: the policy, the forecast, its track
+    record, and the series and fitted arc the interface draws."""
+    pattern = pattern_of_life(report.history, report.manoeuvres)
+    if pattern is None:
+        return None
+    if not pattern.applies:
+        return {
+            "applies": False,
+            "reason": pattern.reason,
+            "burn_count": pattern.burns,
+            "weekday_counts": list(pattern.weekday_counts),
+        }
+    h = report.history
+    p = pattern.policy
+    lon = longitude_deg(h)
+
+    arc = None
+    if pattern.trigger_forecast.arc is not None:
+        start, lon0, rate, accel = pattern.trigger_forecast.arc
+        end = max(pattern.trigger_forecast.predicted_utc, h.epochs_utc[-1])
+        tau = np.linspace(0.0, (end - start).total_seconds() / 86400.0, 80)
+        arc = {
+            "t_unix_ms": [_unix_ms(start + timedelta(days=float(x))) for x in tau],
+            "lon_deg": _clean(lon0 + rate * tau + 0.5 * accel * tau**2, 5),
+        }
+
+    preferred_error = None
+    if pattern.backtests:
+        preferred_error = pattern.backtests[0].score(pattern.preferred).median_abs_days
+    return {
+        "applies": True,
+        "reason": "",
+        "burn_count": pattern.burns,
+        "policy": {
+            "burns": p.burns,
+            "interval_days": _number(p.interval_days, 3),
+            "interval_spread_days": _number(p.interval_spread_days, 3),
+            "delta_v_m_s": _number(p.delta_v_m_s, 4),
+            "delta_a_km": _number(p.delta_a_km, 4),
+            "trigger_longitude_deg": _number(p.trigger_longitude_deg, 5),
+            "trigger_spread_deg": _number(p.trigger_spread_deg, 5),
+            "acceleration_deg_per_day2": _number(p.acceleration_deg_per_day2, 6),
+            "model_acceleration_deg_per_day2": _number(
+                p.model_acceleration_deg_per_day2, 6
+            ),
+            "box_deg": [_number(p.box_deg[0], 5), _number(p.box_deg[1], 5)],
+            "edge_drift_deg_per_day": _number(p.edge_drift_deg_per_day, 5),
+            "timing_floor_days": _number(p.timing_floor_days, 3),
+        },
+        "preferred": pattern.preferred,
+        "forecast_unix_ms": _unix_ms(pattern.forecast.predicted_utc),
+        "forecast_error_days": _number(preferred_error, 3),
+        "trigger_forecast_unix_ms": _unix_ms(pattern.trigger_forecast.predicted_utc),
+        "trigger_fell_back": pattern.trigger_forecast.fell_back,
+        "data_end_unix_ms": _unix_ms(h.epochs_utc[-1]),
+        "backtests": [
+            {
+                "lead_days": b.lead_days,
+                "burns": len(b.entries),
+                "skipped": b.skipped,
+                "truth_half_width_days": _number(b.truth_half_width_days, 3),
+                "interval": _score(b.score("interval")),
+                "trigger": _score(b.score("trigger")),
+            }
+            for b in pattern.backtests
+        ],
+        "weekday_counts": list(pattern.weekday_counts),
+        "longitude": {
+            "t_unix_ms": [_unix_ms(t) for t in h.epochs_utc],
+            "lon_deg": _clean(lon, 5),
+        },
+        "burns": [
+            [_unix_ms(b.start_utc), _unix_ms(b.end_utc)]
+            for b in east_west_burns(report.manoeuvres)
+        ],
+        "arc": arc,
+    }
+
+
 def behaviour(records: Sequence[TLE], sigmas: float = DEFAULT_SIGMAS) -> dict[str, Any]:
     """An object's history, manoeuvres, set-aside events and budgets.
 
@@ -515,4 +610,5 @@ def behaviour(records: Sequence[TLE], sigmas: float = DEFAULT_SIGMAS) -> dict[st
             ),
         },
         "natural": _natural_drift(report),
+        "pattern": _pattern(report),
     }

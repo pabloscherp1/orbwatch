@@ -27,7 +27,7 @@ const OBJECT_PRESETS = [
   { norad: 33591, label: "NOAA 19" },
   { norad: 41866, label: "GOES 16 (GEO)" },
   { norad: 40882, label: "INMARSAT 5-F3 (GEO, HELD)" },
-  { norad: 27438, label: "INTELSAT 905 (GEO, DRIFTING)" },
+  { norad: 27438, label: "INTELSAT 905 (GEO, INCLINED OPS)" },
 ];
 
 const STATION_PRESETS = [
@@ -63,7 +63,14 @@ const LAYERS = [
   ["footprint", "FOOTPRINT", true],
   ["station", "STATION", true],
   ["stars", "STARFIELD", true],
+  ["detailed", "DETAILED COASTS", false],
 ];
+
+// Detailed coastlines have about ten times the vertices of the coarse ones and
+// are redrawn every frame, so they are only used when asked for and when the
+// globe is still enough to show them: not while dragging or zooming, and not at
+// time warps where the globe turns every frame.
+const DETAILED_MAX_RATE = 10;
 
 const RATES = [-3600, -600, -60, -10, 1, 10, 60, 600, 3600];
 const MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
@@ -494,7 +501,9 @@ function drawNight(cur) {
 }
 
 function drawEarth(cur) {
-  const land = state.view.interacting || !geo.land50 ? geo.land110 : geo.land50;
+  const detailed =
+    state.layers.detailed && geo.land50 && !state.view.interacting && Math.abs(clock.rate) <= DETAILED_MAX_RATE;
+  const land = detailed ? geo.land50 : geo.land110;
   if (!land) return;
 
   drawDay(cur);

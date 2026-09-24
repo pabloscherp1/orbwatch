@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import textwrap
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -18,6 +19,9 @@ import numpy as np
 
 from orbwatch.catalog.sources import CatalogFetchError, fetch_celestrak_tle
 from orbwatch.events.analysis import EventReport, analyse
+from orbwatch.events.pattern import pattern_of_life
+
+WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 ARCSEC_PER_RAD = 180.0 / np.pi * 3600.0
 
@@ -26,6 +30,60 @@ def _describe_change(kind: str, change: tuple[float, ...]) -> str:
     if kind == "in_plane":
         return f"{change[0]:+8.2f} km"
     return f"{np.linalg.norm(change) * ARCSEC_PER_RAD:7.1f} arcsec"
+
+
+def format_pattern(report: EventReport) -> list[str]:
+    """The east-west pattern of life section, empty when there is none."""
+    pattern = pattern_of_life(report.history, report.manoeuvres)
+    if pattern is None:
+        return []
+    if not pattern.applies:
+        wrapped = textwrap.wrap(pattern.reason, width=76)
+        return ["", "PATTERN OF LIFE, east-west", "  none."] + [
+            f"  {line}" for line in wrapped
+        ]
+    p = pattern.policy
+    west, east = p.box_deg
+    lines = [
+        "",
+        "PATTERN OF LIFE, east-west",
+        f"  box        {west:.3f} to {east:.3f} deg ({east - west:.3f} wide),"
+        f" burns at {p.trigger_longitude_deg:.3f} +/- {p.trigger_spread_deg:.3f}",
+        f"  cadence    every {p.interval_days:.1f} days"
+        f" (+/- {p.interval_spread_days:.1f}), typically {p.delta_v_m_s:.3f} m/s"
+        f" ({p.delta_a_km * 1000:+.0f} m)",
+        f"  curvature  {p.acceleration_deg_per_day2:.5f} deg/day^2 fitted,"
+        f" {p.model_acceleration_deg_per_day2:.5f} from J22 alone",
+    ]
+    error = ""
+    if pattern.backtests:
+        score = pattern.backtests[0].score(pattern.preferred)
+        error = f" +/- {score.median_abs_days:.1f} days"
+    lines.append(
+        f"  next burn  {pattern.forecast.predicted_utc:%Y-%m-%d %H:%M} UTC"
+        f" by {pattern.preferred}{error}"
+    )
+    for backtest in pattern.backtests:
+        lines.append(
+            f"  track record, predicted {backtest.lead_days:g} d after each burn,"
+            f" {len(backtest.entries)} held-out burns:"
+        )
+        for method in ("interval", "trigger"):
+            s = backtest.score(method)
+            lines.append(
+                f"    {method:<9}median {s.median_abs_days:4.1f} d"
+                f"  mean {s.mean_abs_days:4.1f} d"
+                f"  within a day {100 * s.within_one_day:3.0f}%"
+            )
+    lines.append(
+        f"  timing floor from the operator's own trigger scatter:"
+        f" {p.timing_floor_days:.1f} days"
+    )
+    counts = "  ".join(
+        f"{d} {n}" for d, n in zip(WEEKDAYS, pattern.weekday_counts, strict=True)
+    )
+    lines.append(f"  burns by weekday, windows under a day: {counts}")
+    return lines
 
 
 def format_report(report: EventReport, name: str) -> str:
@@ -90,6 +148,7 @@ def format_report(report: EventReport, name: str) -> str:
             line += f"  ·  closure {100 * closure:.0f}%" if closure is not None else ""
         lines.append(line)
         lines.append(f"  {'':<14}{budget.method}")
+    lines += format_pattern(report)
     return "\n".join(lines)
 
 

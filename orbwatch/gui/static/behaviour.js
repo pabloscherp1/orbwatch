@@ -780,6 +780,7 @@ export function createBehaviourView({ getJSON, onShowRequested }) {
 
     renderBudgets(d, geo);
     renderPlane(d);
+    renderPattern(d);
     renderTable(d, geo);
     renderSurges(d);
 
@@ -955,6 +956,144 @@ export function createBehaviourView({ getJSON, onShowRequested }) {
       caption = `Left alone, this orbit plane would have drifted ${nat.toFixed(3)}°. It moved ${obs.toFixed(3)}°: partly held, or held for only part of the span.`;
     }
     $("ev-plane-caption").textContent = caption;
+  }
+
+  function renderPattern(d) {
+    const pat = d.pattern;
+    $("ev-pattern-section").hidden = !pat;
+    if (!pat) return;
+    const verdict = $("ev-pattern-verdict");
+    verdict.hidden = pat.applies;
+    $("ev-pattern-body").hidden = !pat.applies;
+    if (!pat.applies) {
+      verdict.replaceChildren(el("b", "", "No forecast. "), document.createTextNode(pat.reason));
+      return;
+    }
+    const p = pat.policy;
+    const [west, east] = p.box_deg;
+
+    // Chart: the last six weeks of longitude, the box, the trigger, the fitted
+    // arc since the last burn and the forecast.
+    const W = 400;
+    const H = 240;
+    const m = { l: 76, r: 12, t: 14, b: 28 };
+    const lonT = pat.longitude.t_unix_ms;
+    const lonV = pat.longitude.lon_deg;
+    const errMs = (pat.forecast_error_days ?? 0) * DAY_MS;
+    const t1 = Math.max(pat.data_end_unix_ms + 3 * DAY_MS, pat.forecast_unix_ms + errMs + DAY_MS, pat.trigger_forecast_unix_ms + DAY_MS);
+    const t0 = Math.max(lonT[0], pat.data_end_unix_ms - 42 * DAY_MS);
+    const shown = lonT.map((t, k) => [t, lonV[k]]).filter(([t, v]) => t >= t0 && v !== null);
+    const arcPts = pat.arc ? pat.arc.t_unix_ms.map((t, k) => [t, pat.arc.lon_deg[k]]) : [];
+    const ys = shown.map((q) => q[1]).concat(arcPts.map((q) => q[1]), [west, east, p.trigger_longitude_deg]);
+    const [ya, yb] = d3.extent(ys);
+    const pad = (yb - ya) * 0.12 || 0.005;
+    const x = d3.scaleUtc().domain([t0, t1]).range([m.l, W - m.r]);
+    const y = d3.scaleLinear().domain([ya - pad, yb + pad]).range([H - m.b, m.t]);
+
+    const svg = d3.select("#ev-pattern-chart").selectAll("svg").data([0]).join("svg").attr("viewBox", `0 0 ${W} ${H}`);
+    svg.selectAll("*").remove();
+    svg.append("defs").append("clipPath").attr("id", "ev-pattern-clip").append("rect")
+      .attr("x", m.l).attr("y", m.t).attr("width", W - m.l - m.r).attr("height", H - m.t - m.b);
+    svg.append("rect").attr("class", "bh-frame").attr("x", m.l).attr("y", m.t).attr("width", W - m.l - m.r).attr("height", H - m.t - m.b);
+    const xt = x.ticks(d3.utcWeek.every(1));
+    const yt = y.ticks(4);
+    svg.append("g").attr("class", "bh-grid").selectAll("line").data(xt).join("line")
+      .attr("x1", (v) => x(v)).attr("x2", (v) => x(v)).attr("y1", m.t).attr("y2", H - m.b);
+    svg.append("g").attr("class", "bh-axis").attr("transform", `translate(0,${H - m.b})`)
+      .call(d3.axisBottom(x).tickValues(xt).tickFormat((v) => fmtDay(+v)).tickSizeOuter(0));
+    svg.append("g").attr("class", "bh-axis").attr("transform", `translate(${m.l},0)`)
+      .call(d3.axisLeft(y).tickValues(yt).tickFormat(d3.format(".3f")).tickSizeOuter(0));
+
+    const body = svg.append("g").attr("clip-path", "url(#ev-pattern-clip)");
+    body.append("rect").attr("class", "ev-box").attr("x", m.l).attr("width", W - m.l - m.r)
+      .attr("y", y(east)).attr("height", Math.max(1, y(west) - y(east)));
+    body.selectAll(".ev-burn").data(pat.burns.filter(([s, e]) => e >= t0)).join("rect")
+      .attr("class", "ev-burn").attr("y", m.t).attr("height", H - m.t - m.b)
+      .attr("x", ([s]) => x(s)).attr("width", ([s, e]) => Math.max(1.5, x(e) - x(s)));
+    body.append("line").attr("class", "ev-trigger").attr("x1", m.l).attr("x2", W - m.r)
+      .attr("y1", y(p.trigger_longitude_deg)).attr("y2", y(p.trigger_longitude_deg));
+    body.append("path").attr("class", "ev-lon").attr("d", d3.line().x((q) => x(q[0])).y((q) => y(q[1]))(shown));
+    body.selectAll(".ev-lon-pt").data(shown).join("circle").attr("class", "ev-lon-pt").attr("r", 1.4)
+      .attr("cx", (q) => x(q[0])).attr("cy", (q) => y(q[1]));
+    if (arcPts.length) {
+      body.append("path").attr("class", "ev-arc").attr("d", d3.line().x((q) => x(q[0])).y((q) => y(q[1]))(arcPts));
+    }
+    body.append("line").attr("class", "ev-now").attr("x1", x(pat.data_end_unix_ms)).attr("x2", x(pat.data_end_unix_ms))
+      .attr("y1", m.t).attr("y2", H - m.b);
+    body.append("rect").attr("class", "ev-forecast").attr("y", m.t).attr("height", H - m.t - m.b)
+      .attr("x", x(pat.forecast_unix_ms - errMs)).attr("width", Math.max(2, x(pat.forecast_unix_ms + errMs) - x(pat.forecast_unix_ms - errMs)));
+    body.append("line").attr("class", "ev-forecast-line").attr("x1", x(pat.forecast_unix_ms)).attr("x2", x(pat.forecast_unix_ms))
+      .attr("y1", m.t).attr("y2", H - m.b);
+    const nextX = x(pat.forecast_unix_ms);
+    svg.append("text").attr("class", "ev-label ev-label-next").attr("x", nextX > W - m.r - 20 ? nextX - 4 : nextX)
+      .attr("y", m.t + 10).attr("text-anchor", nextX > W - m.r - 20 ? "end" : "middle").text("NEXT");
+    svg.append("text").attr("class", "ev-label ev-label-trigger").attr("x", m.l + 4).attr("y", y(p.trigger_longitude_deg) - 4).text("BURNS HERE");
+    svg.append("text").attr("class", "ev-label").attr("x", x(pat.data_end_unix_ms) - 4).attr("y", H - m.b - 6)
+      .attr("text-anchor", "end").text("DATA END");
+    svg.append("text").attr("class", "bh-axis-label").attr("transform", `translate(10,${m.t}) rotate(-90)`)
+      .attr("text-anchor", "end").text("mean longitude, deg");
+
+    // Numbers.
+    const error = pat.forecast_error_days;
+    const method = pat.preferred === "interval" ? "CADENCE" : "PHYSICS";
+    $("ev-pattern-rows").replaceChildren(
+      row("BOX", `${west.toFixed(3)}° → ${east.toFixed(3)}° · ${(east - west).toFixed(3)}°`),
+      row("BURNS AT", `${p.trigger_longitude_deg.toFixed(3)}° ± ${p.trigger_spread_deg.toFixed(3)}°`),
+      row("CADENCE", `${p.interval_days.toFixed(1)} d ± ${p.interval_spread_days.toFixed(1)}`),
+      row("TYPICAL BURN", `${fmtSig(p.delta_v_m_s)} m/s · ${p.delta_a_km >= 0 ? "+" : "−"}${Math.round(Math.abs(p.delta_a_km) * 1000)} m`),
+      row("CURVATURE", `${p.acceleration_deg_per_day2.toFixed(5)} · J22 ${p.model_acceleration_deg_per_day2.toFixed(5)}`, "dim"),
+      row("NEXT BURN", `${fmtStamp(pat.forecast_unix_ms)}${error !== null ? ` ± ${error.toFixed(1)} d` : ""}`, "good"),
+      row("FORECAST BY", method, "dim"),
+    );
+
+    // Track record.
+    const track = $("ev-track");
+    track.replaceChildren();
+    for (const b of pat.backtests) {
+      for (const key of ["interval", "trigger"]) {
+        const s = b[key];
+        const tr = el("tr", key === pat.preferred && b === pat.backtests[0] ? "current" : "");
+        tr.append(
+          el("td", "", `${b.lead_days} D AFTER`),
+          el("td", "", key === "interval" ? "CADENCE" : "PHYSICS"),
+          el("td", "", `${s.median_abs_days.toFixed(1)} d`),
+          el("td", "", `${s.mean_abs_days.toFixed(1)} d`),
+          el("td", "", `${Math.round(100 * s.within_one_day)}%`),
+        );
+        track.append(tr);
+      }
+    }
+    const first = pat.backtests[0];
+    $("ev-track-note").textContent = first ? `${first.burns} HELD-OUT BURNS` : "";
+
+    // Weekdays.
+    const days = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+    const counts = pat.weekday_counts;
+    const most = Math.max(1, ...counts);
+    const box = $("ev-weekdays");
+    box.replaceChildren();
+    counts.forEach((n, k) => {
+      const col = el("div", "ev-day");
+      const bar = el("i");
+      bar.style.height = `${(100 * n) / most}%`;
+      col.append(el("b", "", String(n)), el("span", "ev-bar"), el("span", "", days[k]));
+      col.children[1].append(bar);
+      box.append(col);
+    });
+
+    // What it means.
+    const total = counts.reduce((a, b) => a + b, 0);
+    const peak = counts.indexOf(Math.max(...counts));
+    let caption;
+    if (pat.preferred === "interval") {
+      caption = `Forecast from the cadence, which beat the physics on this satellite. The operator burns within ±${p.trigger_spread_deg.toFixed(3)}° of ${p.trigger_longitude_deg.toFixed(3)}°, and near the box edge the satellite drifts ${p.edge_drift_deg_per_day.toFixed(4)}°/day, so the burn time varies by ±${p.timing_floor_days.toFixed(1)} days by the operator's own choice: no forecast built on the drift can do better.`;
+    } else {
+      caption = "Forecast from the physics: the arc since the last burn, curved by the east-west pull of Earth's elliptical equator, reaches the trigger at the marked time. The operator burns at a consistent edge, so the drift predicts it better than the calendar.";
+    }
+    if (total >= 5 && counts[peak] / total >= 0.35) {
+      caption += ` ${Math.round((100 * counts[peak]) / total)}% of well-timed burns fall on a ${["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][peak]}.`;
+    }
+    $("ev-pattern-caption").textContent = caption;
   }
 
   function renderTable(d, geo) {

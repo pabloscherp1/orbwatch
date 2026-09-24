@@ -209,6 +209,51 @@ def test_plane_control_separates_held_free_and_partial(
     assert api.plane_control(natural, observed, required_m_s, 3074.7) == control
 
 
+def test_behaviour_carries_the_pattern_of_life_of_a_station_kept_satellite() -> None:
+    """End to end from TLE text: a synthetic GEO satellite in an east-west box,
+    written out as element sets whose mean longitude follows the cycle."""
+    from datetime import UTC, datetime
+
+    from orbwatch.catalog.frames import gmst_rad
+    from tests.test_pattern import station_kept
+
+    history, _ = station_kept(np.random.default_rng(44), days=200.0)
+    records = []
+    for day, a_km, lon in zip(
+        history.t_days, history.a_km, history.mean_longitude_rad, strict=True
+    ):
+        epoch_day = 10.0 + float(day)
+        epoch = datetime(2026, 1, 1, tzinfo=UTC) + timedelta(days=epoch_day - 1.0)
+        anomaly = np.rad2deg(lon + gmst_rad(epoch)[0]) % 360.0
+        n_rev_day = np.sqrt(398600.8 / a_km**3) * 86400.0 / (2.0 * np.pi)
+        records.append(
+            parse_tle(
+                build_line1(norad_id=40000, epoch_day=epoch_day),
+                build_line2(
+                    norad_id=40000,
+                    inclination_deg=0.05,
+                    raan_deg=0.0,
+                    eccentricity_field="0001000",
+                    argp_deg=0.0,
+                    mean_anomaly_deg=float(anomaly),
+                    mean_motion_rev_per_day=float(n_rev_day),
+                ),
+            )
+        )
+
+    payload = api.behaviour(records)
+    json.dumps(payload, allow_nan=False)
+    pattern = payload["pattern"]
+    assert pattern is not None and pattern["applies"]
+    assert pattern["policy"]["box_deg"][0] == pytest.approx(-137.22, abs=0.006)
+    assert pattern["policy"]["trigger_longitude_deg"] == pytest.approx(
+        -137.18, abs=0.005
+    )
+    assert pattern["forecast_unix_ms"] > pattern["burns"][-1][1]
+    assert len(pattern["longitude"]["t_unix_ms"]) == len(payload["series"]["t_unix_ms"])
+    assert pattern["backtests"] and pattern["arc"] is not None
+
+
 def test_behaviour_refuses_a_history_too_short_to_measure_noise() -> None:
     with pytest.raises(ValueError, match="at least"):
         api.behaviour(leo_history()[:5])

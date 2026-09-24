@@ -21,9 +21,19 @@ from orbwatch.events.history import (
     merge_refits,
     two_sided_transients,
 )
+from orbwatch.events.pattern import (
+    EastWestPolicy,
+    PatternOfLife,
+    backtest_east_west,
+    estimate_east_west_policy,
+    pattern_of_life,
+    predict_next_burn,
+)
 
 __all__ = [
     "Budget",
+    "EastWestPolicy",
+    "PatternOfLife",
     "DataQuality",
     "EventReport",
     "Manoeuvre",
@@ -31,12 +41,16 @@ __all__ = [
     "StepAnalysis",
     "analyse",
     "analyse_steps",
+    "backtest_east_west",
     "build_history",
     "detect_drag_surges",
     "detect_manoeuvres",
+    "estimate_east_west_policy",
     "is_drag_surge",
     "merge_refits",
     "natural_inclination_path_rad",
     "natural_inclination_rate_rad_per_day",
+    "pattern_of_life",
+    "predict_next_burn",
     "two_sided_transients",
 ]
