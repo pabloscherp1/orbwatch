@@ -32,6 +32,7 @@ from orbwatch.transfer.mission import (
     local_time_of_ascending_node_h,
     node_wait_s,
     plan_rendezvous,
+    rideshare_orbit,
     sun_synchronous_orbit,
 )
 
@@ -234,6 +235,26 @@ def test_the_trade_is_a_real_trade_and_drifting_beats_turning() -> None:
     assert min(dv) >= floor.dv_km_s - 1e-6, (
         "no drift beats the unavoidable raise and tilt"
     )
+
+
+def test_the_rideshare_follows_the_target() -> None:
+    """Near-sun-synchronous targets get a sun-synchronous drop-off, where 15 deg
+    of node is one hour of local time; others get their own inclination."""
+    _, envisat = envisat_like()
+    dropoff, kind = rideshare_orbit(envisat, 525.0, np.deg2rad(-15.0), EPOCH)
+    assert kind == "sun-synchronous"
+    reference = sun_synchronous_orbit(
+        525.0, local_time_of_ascending_node_h(envisat, EPOCH) - 1.0, EPOCH
+    )
+    assert dropoff.inclination_rad == pytest.approx(reference.inclination_rad)
+    assert dropoff.raan_rad == pytest.approx(reference.raan_rad, abs=1e-9)
+
+    iss = CircularOrbit(EARTH_RADIUS_KM + 419.0, np.deg2rad(51.63), 1.0, EPOCH)
+    dropoff, kind = rideshare_orbit(iss, 525.0, np.deg2rad(-15.0), EPOCH)
+    assert kind == "matched inclination"
+    assert dropoff.inclination_rad == pytest.approx(iss.inclination_rad)
+    plan = plan_rendezvous(dropoff, iss, max_days=180.0)
+    assert plan.chosen.dv_km_s * 1000 < 150.0, "was 5.9 km/s from a sun-synchronous"
 
 
 def test_an_impossible_deadline_is_refused_with_the_fastest_option() -> None:

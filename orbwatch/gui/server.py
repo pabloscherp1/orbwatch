@@ -7,8 +7,8 @@ Standard library only. It serves the static interface and a small JSON API:
     GET /api/track?norad=&t=&before=&after=&step=&lat=&lon=&alt=&site=&mask=
     GET /api/passes?norad=&t=&hours=&lat=&lon=&alt=&site=&mask=
     GET /api/behaviour?norad=&days=&sigmas=
-    GET /api/mission?norad=&altitude=&offset=&dry=&isp=&inj_alt=&inj_inc=&prox=&ops=
-        &disposal=
+    GET /api/mission?norad=&altitude=&node_offset=&dry=&isp=&inj_alt=&inj_inc=
+        &ops=&disposal=&ellipse=&keep_out=&orbits=&errors=
 
 Run it with ``python -m orbwatch.gui`` or ``orbwatch-gui``.
 
@@ -62,14 +62,17 @@ MISSION_CACHE_SIZE: int = 32
 
 MISSION_PARAMETERS: dict[str, tuple[str, float, float, float]] = {
     "altitude": ("dropoff_altitude_km", 525.0, 300.0, 1200.0),
-    "offset": ("ltan_offset_h", -1.0, -6.0, 6.0),
+    "node_offset": ("node_offset_deg", -15.0, -90.0, 90.0),
     "dry": ("dry_mass_kg", 150.0, 1.0, 10000.0),
     "isp": ("isp_s", 220.0, 30.0, 500.0),
     "inj_alt": ("injection_altitude_error_km", 10.0, 0.0, 100.0),
     "inj_inc": ("injection_inclination_error_deg", 0.1, 0.0, 2.0),
-    "prox": ("proximity_allocation_m_s", 10.0, 0.0, 500.0),
     "ops": ("operations_days", 90.0, 0.0, 3650.0),
     "disposal": ("disposal_perigee_km", 300.0, 100.0, 1000.0),
+    "ellipse": ("ellipse_m", 250.0, 50.0, 2000.0),
+    "keep_out": ("keep_out_m", 200.0, 10.0, 1000.0),
+    "orbits": ("inspection_orbits", 5.0, 1.0, 30.0),
+    "errors": ("error_scale", 1.0, 0.0, 5.0),
 }
 """Query name: (argument, default, minimum, maximum)."""
 
@@ -313,6 +316,8 @@ class TrackerRequestHandler(SimpleHTTPRequestHandler):
                     HTTPStatus.BAD_REQUEST, f"'{name}' must be in [{low:g}, {high:g}]"
                 )
             values[argument] = value
+        if values["inspection_orbits"] != int(values["inspection_orbits"]):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "'orbits' must be a whole number")
         epoch = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
         key = (norad_id, epoch, tuple(sorted(values.items())))
         with self.mission_cache_lock:
@@ -332,10 +337,14 @@ class TrackerRequestHandler(SimpleHTTPRequestHandler):
                 tle,
                 epoch,
                 dropoff_altitude_km=values["dropoff_altitude_km"],
-                ltan_offset_h=values["ltan_offset_h"],
+                node_offset_deg=values["node_offset_deg"],
                 dry_mass_kg=values["dry_mass_kg"],
                 isp_s=values["isp_s"],
                 assumptions=assumptions,
+                ellipse_m=values["ellipse_m"],
+                keep_out_m=values["keep_out_m"],
+                inspection_orbits=int(values["inspection_orbits"]),
+                error_scale=values["error_scale"],
             )
         except ValueError as error:
             raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, str(error)) from error

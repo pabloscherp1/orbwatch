@@ -5,8 +5,9 @@ Satellite tracking and manoeuvre detection from public orbital data, in Python.
 ORBWATCH reconstructs a year of an object's orbit from its public element sets,
 finds when it manoeuvred, estimates the propellant that took, and states what
 the data cannot resolve. It then plans a mission to go and inspect it: the
-transfer from a rideshare drop-off, and a delta-v and propellant budget with
-margins.
+transfer from a rideshare drop-off, a passively safe approach and inspection
+around the target tested by Monte Carlo, and a delta-v and propellant budget
+with margins.
 
 ![Behaviour view: a year of ISS reboosts, detected and budgeted](docs/behaviour-iss.png)
 
@@ -44,10 +45,19 @@ margins.
   the better record
 
 **Mission design**
-- Plans a rendezvous from a rideshare drop-off to a catalogued target: Hohmann
+- Plans a rendezvous from a rideshare drop-off to a catalogued target, from a
+  sun-synchronous rideshare or one into the target's own inclination: Hohmann
   transfers with optimally split plane changes, a Lambert solver for the
   far-range approach, and J2 drift orbits that line up the orbit planes for
   free, traded against time
+- Designs the proximity operations in the target's frame with
+  Clohessy-Wiltshire relative motion in curvilinear coordinates: radial hops
+  along the V-bar, a safety ellipse with radial and cross-track separation,
+  and two-impulse transfers chosen so that any single failed burn leaves the
+  spacecraft outside a keep-out sphere
+- Flies that sequence 1,000 times with navigation and burn errors, recomputing
+  every burn from a noisy relative position; the 99th-percentile delta-v is the
+  proximity line of the budget
 - Builds the delta-v budget with ESA assessment-study margins and sizes the
   propellant
 
@@ -56,12 +66,18 @@ margins.
   globe with ground track, footprint, station horizon and passes; its
   behaviour, with history, manoeuvres, budgets and pattern of life; and a
   mission plan to reach it, where the time budget, the drop-off and the
-  spacecraft can be changed and the time against delta-v trade updates live.
-  Every number comes from the tested Python modules; the browser only draws.
+  spacecraft can be changed and the time against delta-v trade updates live,
+  and the proximity operations around it, with the failure case of every burn
+  and the Monte Carlo behind the budget. Every number comes from the tested
+  Python modules; the browser only draws.
 
 <p>
   <img src="docs/tracker.png" width="49%" alt="Live tracker: ISS ground track, footprint and pass prediction">
   <img src="docs/behaviour-inmarsat.png" width="49%" alt="Behaviour view of a geostationary satellite held against natural drift">
+</p>
+<p>
+  <img src="docs/mission-transfer.png" width="49%" alt="Mission view: time against delta-v to reach ENVISAT from a sun-synchronous rideshare">
+  <img src="docs/mission-proximity.png" width="49%" alt="Proximity operations around ENVISAT: approach, safety ellipse, a failed burn's path and the Monte Carlo">
 </p>
 
 ## Validation
@@ -78,6 +94,8 @@ One year of history to September 2026, at the default five-sigma threshold.
 | INTELSAT 905 | Inclination not held | Plane drifts as the model predicts, within 9%; 46 east-west burns, roughly weekly, all in the same direction |
 | Lambert solver | Curtis, example 5.2 | Matched to the published four decimals |
 | Sun-synchronous local time | Sentinel-2A, published 22:30 | 22:30 |
+| Clohessy-Wiltshire, curvilinear | 5 km radial hop in low orbit against two-body motion, one orbit | Within 1.2 m, where straight-line coordinates are 55 m off |
+| Proximity operations, ENVISAT | Each burn failing in turn; 1,000 Monte Carlo runs | Every failure stays outside the 200 m keep-out sphere; 0.4% of runs enter it at typical errors, 19% at three times those |
 | INTELSAT 905 | Next-burn forecast, 18 held-out burns | Median error 1.4 days, the limit set by the operator's own variability in where it burns |
 
 ## Limits
@@ -92,6 +110,9 @@ One year of history to September 2026, at the default five-sigma threshold.
   verdict saying so instead of a forecast.
 - The GEO drift model is a simplified Laplace-plane precession, good to about
   10% over a year.
+- Proximity operations assume a near-circular target orbit, impulsive burns
+  and no differential drag. Navigation is one noisy fix at each burn, not a
+  filter, so the Monte Carlo is a sizing tool rather than a guidance design.
 
 ## Quick start
 
@@ -126,10 +147,11 @@ python -m orbwatch.events 25544 --plot iss.png
 ```
 
 **Mission plan.** A rendezvous with ENVISAT from a 525 km sun-synchronous
-rideshare, with the time against delta-v trade and the budget:
+rideshare, with the time against delta-v trade, the proximity operations and
+the budget:
 
 ```
-python -m orbwatch.transfer 27386 --dropoff-altitude 525 --max-days 180
+python -m orbwatch.transfer 27386 --dropoff-altitude 525 --plane-offset -15 --max-days 180
 ```
 
 ## Layout
@@ -140,6 +162,7 @@ orbwatch/
   access/    lighting and pass prediction
   events/    history cleaning, manoeuvre detection, pattern of life, CLI
   transfer/  Kepler propagation, Lambert, manoeuvres, J2 drift, rendezvous plan
+  rpo/       Clohessy-Wiltshire, curvilinear frames, approach design, Monte Carlo
   budget/    delta-v and propellant budget with margins
   gui/       local web server and browser interface
 tests/       unit tests; tests that need the internet are marked "network"
@@ -148,9 +171,9 @@ tests/       unit tests; tests that need the internet are marked "network"
 The astrodynamics is implemented here rather than imported, with one
 exception: SGP4, which nobody should reimplement. Every function documents its
 reference frame and units; internally the convention is km, km/s, radians and
-seconds.
+seconds, with metres and m/s for motion relative to a target.
 
-Next: proximity operations for the inspection mission.
+Next: missions that start from a catalogued spacecraft instead of a rideshare.
 
 ## Licence
 

@@ -1,12 +1,13 @@
 """Command line: plan an inspection rendezvous with a catalogued object.
 
     python -m orbwatch.transfer 27386
-    python -m orbwatch.transfer 27386 --dropoff-altitude 550 --ltan-offset -2 \\
+    python -m orbwatch.transfer 27386 --dropoff-altitude 550 --plane-offset -30 \\
         --max-days 120 --dry-mass 150 --isp 220
 
 The target's current element set comes from Celestrak. The drop-off is a
-sun-synchronous rideshare orbit whose local time of ascending node is the
-target's plus an offset in hours.
+rideshare orbit whose node is the target's plus an offset in degrees:
+sun-synchronous for near-sun-synchronous targets, in the target's own
+inclination for any other.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import numpy as np
 
 from orbwatch.budget.budget import REFERENCE, REQUIREMENTS, Budget, build_budget
 from orbwatch.catalog.sources import CatalogFetchError, fetch_celestrak_tle
+from orbwatch.rpo import PROXIMITY_PERCENTILE, ProximityPlan, plan_proximity
 from orbwatch.transfer.mission import (
     MissionAssumptions,
     RendezvousPlan,
@@ -26,7 +28,7 @@ from orbwatch.transfer.mission import (
     local_time_of_ascending_node_h,
     orbit_from_tle,
     plan_rendezvous,
-    sun_synchronous_orbit,
+    rideshare_orbit,
 )
 
 SHOWN_DAYS: float = 730.0
@@ -49,7 +51,7 @@ def format_plan(plan: RendezvousPlan, name: str) -> str:
         f" i {np.rad2deg(t.inclination_rad):.3f} deg,"
         f" ascending node at {_clock(local_time_of_ascending_node_h(t, epoch))}"
         " local time",
-        f"  drop-off   {d.altitude_km:6.1f} km sun-synchronous,"
+        f"  drop-off   {d.altitude_km:6.1f} km,"
         f" i {np.rad2deg(d.inclination_rad):.3f} deg,"
         f" ascending node at {_clock(local_time_of_ascending_node_h(d, epoch))}",
         f"  gap        {np.rad2deg(plan.delta_raan_rad):+.2f} deg of node,"
@@ -86,6 +88,38 @@ def format_plan(plan: RendezvousPlan, name: str) -> str:
     return "\n".join(lines)
 
 
+def format_proximity(proximity: ProximityPlan) -> str:
+    d, mc = proximity.design, proximity.monte_carlo
+    lines = [
+        "",
+        "PROXIMITY OPERATIONS, Clohessy-Wiltshire in curvilinear coordinates",
+        f"  safety ellipse {d.ellipse_radial_m:g} m radial,"
+        f" {d.ellipse_cross_track_m:g} m cross-track;"
+        f" keep-out sphere {d.keep_out_m:g} m;"
+        f" {d.inspection_orbits} orbits of inspection",
+        f"  {'burn':<28}{'min':>7}{'m/s':>8}   if it fails, closest approach",
+    ]
+    checks = {c.burn: c for c in proximity.checks}
+    for k, burn in enumerate(d.burns):
+        check = checks.get(k)
+        verdict = (
+            f"{check.min_distance_m:7.0f} m {'safe' if check.passes else 'UNSAFE'}"
+            if check
+            else ""
+        )
+        lines.append(
+            f"  {burn.label:<28}{burn.time_s / 60:7.0f}{burn.dv_m_s:8.3f}   {verdict}"
+        )
+    lines += [
+        f"  nominal {d.dv_m_s:.2f} m/s over {d.end_time_s / 3600:.1f} h",
+        f"  Monte Carlo, {mc.runs} runs: mean {mc.dv_m_s.mean():.2f},"
+        f" 99th percentile {mc.dv_percentile(99):.2f} m/s; closest approach 1st"
+        f" percentile {np.percentile(mc.min_distance_m, 1):.0f} m; inside keep-out"
+        f" {100 * mc.violation_fraction:.2f}% of runs",
+    ]
+    return "\n".join(lines)
+
+
 def format_budget(budget: Budget, assumptions: MissionAssumptions) -> str:
     lines = [
         "",
@@ -112,7 +146,6 @@ def format_budget(budget: Budget, assumptions: MissionAssumptions) -> str:
         "ASSUMPTIONS",
         f"  injection error {assumptions.injection_altitude_error_km:g} km and"
         f" {assumptions.injection_inclination_error_deg:g} deg;"
-        f" proximity allocation {assumptions.proximity_allocation_m_s:g} m/s;"
         f" {assumptions.operations_days:g} days of operations;"
         f" disposal perigee {assumptions.disposal_perigee_km:g} km",
         "  mean J2 dynamics, circular orbits, impulsive burns, no drag",
@@ -129,10 +162,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("norad", type=int, help="target NORAD catalogue number")
     parser.add_argument("--dropoff-altitude", type=float, default=525.0)
     parser.add_argument(
-        "--ltan-offset",
+        "--plane-offset",
         type=float,
-        default=-1.0,
-        help="drop-off local time of ascending node minus the target's, hours",
+        default=-15.0,
+        help="drop-off node minus the target's, degrees (15 deg is 1 h of local"
+        " time for sun-synchronous orbits)",
     )
     parser.add_argument("--max-days", type=float, default=180.0)
     parser.add_argument("--dry-mass", type=float, default=150.0, help="nominal, kg")
@@ -151,17 +185,25 @@ def main(argv: list[str] | None = None) -> int:
         else datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     )
     target = orbit_from_tle(tle)
-    ltan = local_time_of_ascending_node_h(target, epoch) + args.ltan_offset
-    dropoff = sun_synchronous_orbit(args.dropoff_altitude, ltan % 24.0, epoch)
+    dropoff, _ = rideshare_orbit(
+        target, args.dropoff_altitude, np.deg2rad(args.plane_offset), epoch
+    )
     try:
         plan = plan_rendezvous(dropoff, target, max_days=args.max_days)
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     assumptions = MissionAssumptions()
-    budget = build_budget(budget_items(plan, assumptions), args.dry_mass, args.isp)
+    proximity = plan_proximity(plan.target.a_km)
+    basis = (
+        f"Monte Carlo {PROXIMITY_PERCENTILE:g}th percentile,"
+        f" {proximity.monte_carlo.runs} runs"
+    )
+    items = budget_items(plan, assumptions, (proximity.budget_dv_m_s, basis))
+    budget = build_budget(items, args.dry_mass, args.isp)
     name = f"{tle.name or 'NORAD'} (NORAD {args.norad})"
     print(format_plan(plan, name))
+    print(format_proximity(proximity))
     print(format_budget(budget, assumptions))
     return 0
 

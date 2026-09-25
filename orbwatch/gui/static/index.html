@@ -128,21 +128,39 @@
     <section class="behaviour-wrap" id="mission-wrap" hidden>
       <div class="bh-toolbar">
         <div class="bh-heading">
-          <div class="hud-title" id="ms-name">--</div>
+          <div class="ms-heading-row">
+            <div class="hud-title" id="ms-name">--</div>
+            <span class="segmented" id="ms-mode">
+              <button data-mode="transfer" class="on" title="Getting there: from the rideshare to 5 km behind the target">TRANSFER</button><button data-mode="proximity" title="Once there: approach, inspect, leave (P toggles)">PROXIMITY</button>
+            </span>
+          </div>
           <div class="hud-line" id="ms-sub"></div>
         </div>
-        <div class="ms-controls">
+        <div class="ms-controls" id="ms-controls-proximity" hidden>
+          <label class="ms-slider" title="Size of the safety ellipse, radially and cross-track. Its closest pass to the target's orbit line is this far, whatever happens in-track">SAFETY ELLIPSE <b id="ms-ellipse-v">250 m</b>
+            <input type="range" id="ms-ellipse" min="100" max="1000" step="25" value="250">
+          </label>
+          <label class="ms-slider" title="Radius of the sphere around the target that no trajectory may enter, planned or after a failed burn">KEEP-OUT <b id="ms-keepout-v">200 m</b>
+            <input type="range" id="ms-keepout" min="50" max="975" step="25" value="200">
+          </label>
+          <label class="ms-slider" title="Orbits spent inspecting on the safety ellipse">INSPECTION <b id="ms-orbits-v">5 orbits</b>
+            <input type="range" id="ms-orbits" min="1" max="15" step="1" value="5">
+          </label>
+          <label class="ms-slider" title="Navigation and burn errors in the Monte Carlo, as a multiple of typical: range 1% and bearing 0.05 deg, burn size 2% and pointing 1 deg">ERRORS <b id="ms-errors-v">×1 typical</b>
+            <input type="range" id="ms-errors" min="0" max="4" step="0.25" value="1">
+          </label>
+        </div>
+        <div class="ms-controls" id="ms-controls-transfer">
           <label class="ms-slider" title="Altitude of the sun-synchronous rideshare orbit you are dropped in">DROP-OFF <b id="ms-alt-v">525 km</b>
             <input type="range" id="ms-alt" min="400" max="800" step="25" value="525">
           </label>
-          <label class="ms-slider" title="Drop-off equator crossing time minus the target's. Each hour is 15 degrees of orbit plane to make up">PLANE OFFSET <b id="ms-offset-v">−1 h</b>
-            <input type="range" id="ms-offset" min="-3" max="3" step="0.25" value="-1">
+          <label class="ms-slider" title="How far the drop-off's orbit plane is turned from the target's, in degrees of node. For sun-synchronous orbits every 15 degrees is one hour of equator crossing time">PLANE OFFSET <b id="ms-offset-v">−15°</b>
+            <input type="range" id="ms-offset" min="-45" max="45" step="1" value="-15">
           </label>
           <label class="ms-slider" title="Longest you are willing to wait to reach the target">TIME BUDGET <b id="ms-days-v">180 d</b>
             <input type="range" id="ms-days" min="20" max="730" step="1" value="180">
           </label>
         </div>
-        <div class="callout ms-warning" id="ms-warning" hidden></div>
       </div>
       <div class="bh-charts" id="ms-charts">
         <div id="ms-tooltip" class="bh-tooltip" hidden></div>
@@ -150,13 +168,21 @@
         <div id="ms-loading" class="loading hidden"><span>PLANNING THE RENDEZVOUS</span></div>
       </div>
       <div class="bh-footer">
-        <div class="legend">
+        <div class="legend" id="ms-legend-transfer">
           <span class="chip"><i class="sw sw-option"></i>ONE WAY TO GET THERE</span>
           <span class="chip"><i class="sw sw-chosen"></i>CHOSEN</span>
           <span class="chip"><i class="sw sw-budget"></i>TIME BUDGET</span>
           <span class="chip"><i class="sw sw-floor"></i>FLOOR</span>
         </div>
-        <div class="hint">DRAG THE TIME BUDGET · CLICK A DOT TO CHOOSE IT</div>
+        <div class="hint" id="ms-hint-transfer">DRAG THE TIME BUDGET · CLICK A DOT TO CHOOSE IT</div>
+        <div class="legend" id="ms-legend-proximity" hidden>
+          <span class="chip"><i class="sw sw-nominal"></i>PLANNED</span>
+          <span class="chip"><i class="sw sw-runs"></i>MONTE CARLO RUNS</span>
+          <span class="chip"><i class="sw sw-burn"></i>BURN</span>
+          <span class="chip"><i class="sw sw-missed"></i>IF THAT BURN FAILS</span>
+          <span class="chip"><i class="sw sw-keepout"></i>KEEP-OUT</span>
+        </div>
+        <div class="hint" id="ms-hint-proximity" hidden>SCROLL ZOOM · DRAG PAN · DOUBLE-CLICK RESET · HOVER OR CLICK A BURN</div>
       </div>
     </section>
 
@@ -263,7 +289,7 @@
         <div class="section-title">KEYS</div>
         <div class="keys">
           <span><kbd>Space</kbd> pause</span><span><kbd>←</kbd><kbd>→</kbd> rate</span>
-          <span><kbd>L</kbd> live</span><span><kbd>F</kbd> follow</span><span><kbd>B</kbd> behaviour</span><span><kbd>M</kbd> mission</span><span><kbd>1</kbd>-<kbd>6</kbd> tabs</span>
+          <span><kbd>L</kbd> live</span><span><kbd>F</kbd> follow</span><span><kbd>B</kbd> behaviour</span><span><kbd>M</kbd> mission</span><span><kbd>P</kbd> proximity</span><span><kbd>1</kbd>-<kbd>6</kbd> tabs</span>
         </div>
       </div>
 
@@ -276,6 +302,18 @@
           <p class="callout" id="mt-over" hidden></p>
           <div class="section-title">STEPS</div>
           <ol class="mt-steps" id="mt-steps"></ol>
+
+          <details class="mt-fold" id="mt-prox-fold">
+            <summary>PROXIMITY <span class="note" id="mt-prox-sum"></span></summary>
+            <div class="grid-rows" id="mt-prox"></div>
+            <div class="table-wrap">
+              <table class="passes events mt-burns">
+                <thead><tr><th>#</th><th>BURN</th><th>M/S</th><th>IF IT FAILS</th></tr></thead>
+                <tbody id="mt-burns"></tbody>
+              </table>
+            </div>
+            <p class="footnote" id="mt-prox-note"></p>
+          </details>
 
           <details class="mt-fold">
             <summary>BUDGET <span class="note" id="mt-budget-sum"></span></summary>
@@ -311,7 +349,6 @@
             <form id="mt-assume" class="form-grid" autocomplete="off">
               <label>INJECTION ERROR KM <input id="mt-inj-alt" type="number" min="0" max="100" step="1"></label>
               <label>INJECTION ERROR DEG <input id="mt-inj-inc" type="number" min="0" max="2" step="0.01"></label>
-              <label>PROXIMITY OPS M/S <input id="mt-prox" type="number" min="0" max="500" step="1"></label>
               <label>OPERATIONS DAYS <input id="mt-ops" type="number" min="0" max="3650" step="1"></label>
               <label class="span2">DISPOSAL PERIGEE KM <input id="mt-disposal" type="number" min="100" max="1000" step="10"></label>
               <button type="submit" class="btn-accent">APPLY</button>

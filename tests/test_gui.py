@@ -291,7 +291,7 @@ def test_mission_payload_is_a_real_trade_with_a_budget_for_every_option() -> Non
     assert days == sorted(days) and transfer == sorted(transfer, reverse=True)
     assert min(transfer) >= payload["floor_m_s"] - 1e-6
     assert payload["direct_m_s"] > 5 * min(transfer)
-    assert payload["warning"] is None
+    assert payload["dropoff"]["kind"] == "sun-synchronous"
     assert payload["gap"]["raan_deg"] == pytest.approx(15.0, abs=0.01)
     assert any(o["total_days"] <= payload["default_budget_days"] for o in options)
     for option in options:
@@ -300,10 +300,45 @@ def test_mission_payload_is_a_real_trade_with_a_budget_for_every_option() -> Non
         assert option["arrival_unix_ms"] > payload["epoch_unix_ms"]
 
 
-def test_mission_warns_about_inclination_and_refuses_geostationary_targets(
+def test_mission_uses_a_rideshare_into_the_targets_inclination_off_sso(
     iss_like: TLE,
 ) -> None:
-    assert "inclination" in api.mission(iss_like, MISSION_EPOCH)["warning"]
+    """Regression: the ISS was planned from a sun-synchronous drop-off 46 deg of
+    inclination away, at 6 km/s and four tonnes of propellant."""
+    payload = api.mission(iss_like, MISSION_EPOCH)
+    assert payload["dropoff"]["kind"] == "matched inclination"
+    assert payload["gap"]["inclination_deg"] == pytest.approx(0.0, abs=1e-6)
+    assert min(o["transfer_m_s"] for o in payload["options"]) < 150.0
+
+
+def test_mission_budgets_proximity_from_its_monte_carlo() -> None:
+    payload = api.mission(sso_target(), MISSION_EPOCH)
+    proximity = payload["proximity"]
+    mc = proximity["monte_carlo"]
+    k = [line["label"] for line in payload["lines"]].index("Proximity operations")
+
+    assert payload["lines"][k]["category"] == "calculated"
+    for option in payload["options"]:
+        assert option["lines"][k][0] == pytest.approx(mc["dv_budget_m_s"], abs=0.01)
+    assert proximity["dv_m_s"] < mc["dv_budget_m_s"] < 1.5 * proximity["dv_m_s"]
+    assert len(mc["dv_m_s"]) == len(mc["closest_m"]) == mc["runs"]
+    assert proximity["all_safe"] and mc["inside_keep_out"] < 0.01
+    for burn in proximity["burns"]:
+        assert (burn["missed"] is None) == (burn["dv_m_s"] == 0.0)
+    assert proximity["hold_m"] == pytest.approx(1000 * payload["approach"]["hold_km"])
+
+
+def test_mission_proximity_follows_its_settings() -> None:
+    worse = api.mission(sso_target(), MISSION_EPOCH, error_scale=3.0)["proximity"]
+    assert worse["monte_carlo"]["inside_keep_out"] > 0.05, "errors are not free"
+    wide = api.mission(sso_target(), MISSION_EPOCH, ellipse_m=600, keep_out_m=400)
+    assert wide["proximity"]["ellipse_radial_m"] == 600
+    assert wide["proximity"]["keep_out_m"] == 400
+    with pytest.raises(ValueError, match="wider than the keep-out"):
+        api.mission(sso_target(), MISSION_EPOCH, ellipse_m=200, keep_out_m=200)
+
+
+def test_mission_refuses_geostationary_targets() -> None:
     geo = parse_tle(
         build_line1(norad_id=40882),
         build_line2(
@@ -453,6 +488,10 @@ def test_mission_endpoint_validates_parameters_and_caches(server_url: str) -> No
 
     code, body, _ = get(f"{server_url}/api/mission?norad=25544&altitude=50")
     assert code == 400 and "altitude" in json.loads(body)["error"]
+    code, body, _ = get(f"{server_url}/api/mission?norad=25544&orbits=2.5")
+    assert code == 400 and "whole number" in json.loads(body)["error"]
+    code, body, _ = get(f"{server_url}/api/mission?norad=25544&ellipse=150")
+    assert code == 422 and "keep-out" in json.loads(body)["error"]
 
 
 def test_index_page_is_served(server_url: str) -> None:

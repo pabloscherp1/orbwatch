@@ -57,6 +57,14 @@ from orbwatch.events.pattern import (
     longitude_deg,
     pattern_of_life,
 )
+from orbwatch.rpo import (
+    PROXIMITY_PERCENTILE,
+    Dispersions,
+    ProximityPlan,
+    cw,
+    plan_proximity,
+)
+from orbwatch.rpo.approach import ELLIPSE_RADIAL_M, INSPECTION_ORBITS, KEEP_OUT_M
 from orbwatch.transfer.j2 import EARTH_RADIUS_KM
 from orbwatch.transfer.manoeuvres import hohmann
 from orbwatch.transfer.mission import (
@@ -69,7 +77,7 @@ from orbwatch.transfer.mission import (
     local_time_of_ascending_node_h,
     orbit_from_tle,
     pareto_front,
-    sun_synchronous_orbit,
+    rideshare_orbit,
     terminal_approach,
 )
 
@@ -641,27 +649,111 @@ planes, which only makes sense for low-orbit targets."""
 
 MISSION_SHOWN_DAYS: float = 730.0
 MISSION_DEFAULT_BUDGET_DAYS: float = 180.0
-INCLINATION_WARNING_DEG: float = 5.0
+PROXIMITY_RUNS: int = 1000
+PROXIMITY_SHOWN_RUNS: int = 20
+PROXIMITY_STEP_S: float = 120.0
+"""Sampling of the drawn trajectories. The Monte Carlo itself checks the
+keep-out sphere every 60 s."""
+
+
+def _path(states: np.ndarray) -> list[list[float]]:
+    """Radial, in-track, cross-track positions rounded to 0.1 m for drawing."""
+    return np.round(states[..., :3], 1).tolist()
+
+
+def _proximity(plan: ProximityPlan, error_scale: float) -> dict[str, Any]:
+    """The designed approach, what each burn failing would do, and the Monte
+    Carlo that sizes the budget line."""
+    d, mc = plan.design, plan.monte_carlo
+    checks = {c.burn: c for c in plan.checks}
+    stride = max(1, round(PROXIMITY_STEP_S / 60.0))
+    burns = []
+    for k, burn in enumerate(d.burns):
+        entry: dict[str, Any] = {
+            "label": burn.label,
+            "kind": burn.kind,
+            "time_h": _number(burn.time_s / 3600.0, 4),
+            "dv_m_s": _number(burn.dv_m_s, 4),
+            "p99_m_s": _number(np.percentile(mc.burn_dv_m_s[:, k], 99), 4),
+            "position_m": _path(burn.state_before),
+            "missed": None,
+        }
+        check = checks.get(k)
+        if check is not None:
+            coast = np.arange(0.0, d.safety_orbits * d.period_s, PROXIMITY_STEP_S)
+            entry["missed"] = {
+                "closest_m": _number(check.min_distance_m, 1),
+                "after_h": _number(check.time_after_s / 3600.0, 3),
+                "passes": check.passes,
+                "path": _path(cw.propagate(burn.state_before, d.n, coast)),
+            }
+        burns.append(entry)
+    times, nominal = d.trajectory(PROXIMITY_STEP_S)
+    base = Dispersions()
+    return {
+        "hold_m": _number(-d.burns[0].state_before[1], 1),
+        "ellipse_radial_m": d.ellipse_radial_m,
+        "ellipse_cross_track_m": d.ellipse_cross_track_m,
+        "keep_out_m": d.keep_out_m,
+        "inspection_orbits": d.inspection_orbits,
+        "safety_orbits": d.safety_orbits,
+        "period_min": _number(d.period_s / 60.0, 2),
+        "duration_h": _number(d.end_time_s / 3600.0, 3),
+        "dv_m_s": _number(d.dv_m_s, 3),
+        "all_safe": all(c.passes for c in plan.checks),
+        "burns": burns,
+        "nominal": _path(nominal),
+        "nominal_h": _clean(times / 3600.0, 4),
+        "monte_carlo": {
+            "runs": mc.runs,
+            "percentile": PROXIMITY_PERCENTILE,
+            "dv_mean_m_s": _number(float(mc.dv_m_s.mean()), 3),
+            "dv_budget_m_s": _number(plan.budget_dv_m_s, 3),
+            "closest_p1_m": _number(float(np.percentile(mc.min_distance_m, 1)), 1),
+            "inside_keep_out": _number(mc.violation_fraction, 4),
+            "dv_m_s": _clean(mc.dv_m_s, 3),
+            "closest_m": _clean(mc.min_distance_m, 1),
+            "shown": _path(mc.sample_states[:PROXIMITY_SHOWN_RUNS, ::stride]),
+            "shown_h": _clean(mc.sample_times_s[::stride] / 3600.0, 4),
+            "error_scale": error_scale,
+            "errors": {
+                "range_percent": 100 * base.range_fraction * error_scale,
+                "bearing_deg": base.bearing_deg * error_scale,
+                "burn_magnitude_percent": 100 * base.magnitude_fraction * error_scale,
+                "burn_pointing_deg": base.pointing_deg * error_scale,
+                "arrival_m": base.arrival_position_m * error_scale,
+            },
+        },
+    }
 
 
 def mission(
     tle: TLE,
     epoch_utc: datetime,
     dropoff_altitude_km: float = 525.0,
-    ltan_offset_h: float = -1.0,
+    node_offset_deg: float = -15.0,
     dry_mass_kg: float = 150.0,
     isp_s: float = 220.0,
     assumptions: MissionAssumptions | None = None,
+    ellipse_m: float = ELLIPSE_RADIAL_M,
+    keep_out_m: float = KEEP_OUT_M,
+    inspection_orbits: int = INSPECTION_ORBITS,
+    error_scale: float = 1.0,
 ) -> dict[str, Any]:
     """The whole rendezvous trade for one target, with a budget for every option.
 
     Every option on the time against delta-v front comes with its complete
     budget, so the interface can move along the front without asking again.
+    The proximity operations are designed and Monte Carlo'd once, around the
+    target, and their 99th-percentile delta-v is the proximity budget line.
+    ``ellipse_m`` sizes the safety ellipse radially and cross-track alike, and
+    ``error_scale`` multiplies every navigation and execution error.
 
     Raises
     ------
     ValueError
-        For targets above ``MISSION_MAX_TARGET_ALTITUDE_KM``.
+        For targets above ``MISSION_MAX_TARGET_ALTITUDE_KM``, or a safety
+        ellipse no wider than the keep-out sphere.
     """
     assumptions = assumptions or MissionAssumptions()
     epoch = require_utc(epoch_utc)
@@ -674,8 +766,8 @@ def mission(
         )
     target_now = target.at(epoch)
     ltan_target = local_time_of_ascending_node_h(target, epoch)
-    dropoff = sun_synchronous_orbit(
-        dropoff_altitude_km, (ltan_target + ltan_offset_h) % 24.0, epoch
+    dropoff, dropoff_kind = rideshare_orbit(
+        target, dropoff_altitude_km, np.deg2rad(node_offset_deg), epoch
     )
     front = [
         o
@@ -685,19 +777,24 @@ def mission(
     if not front:
         raise ValueError("no drift orbit lines up the planes within two years")
     approach = terminal_approach(target_now)
+    proximity = plan_proximity(
+        target.a_km,
+        Dispersions().scaled(error_scale),
+        runs=PROXIMITY_RUNS,
+        hold_m=approach.hold_km * 1000.0,
+        ellipse_radial_m=ellipse_m,
+        ellipse_cross_track_m=ellipse_m,
+        keep_out_m=keep_out_m,
+        inspection_orbits=int(inspection_orbits),
+    )
+    proximity_line = (
+        proximity.budget_dv_m_s,
+        f"Monte Carlo {PROXIMITY_PERCENTILE:g}th percentile, {PROXIMITY_RUNS} runs",
+    )
     direct = direct_transfer(dropoff, target)
     delta_i = target.inclination_rad - dropoff.inclination_rad
     floor = hohmann(dropoff.a_km, target.a_km, delta_i)
     gap = float(np.rad2deg(_wrap(target_now.raan_rad - dropoff.raan_rad)))
-
-    warning = None
-    if abs(np.rad2deg(delta_i)) > INCLINATION_WARNING_DEG:
-        warning = (
-            f"The drop-off is sun-synchronous, {abs(np.rad2deg(delta_i)):.0f} deg of"
-            " inclination away from this target. J2 turns orbit planes about the"
-            " pole but cannot change inclination, so that difference is paid in"
-            " full. A rideshare to the target's own inclination would be needed."
-        )
 
     options = []
     labels: list[str] = []
@@ -714,7 +811,7 @@ def mission(
             direct=direct,
             approach=approach,
         )
-        items = budget_items(plan, assumptions)
+        items = budget_items(plan, assumptions, proximity_line)
         budget = build_budget(items, dry_mass_kg, isp_s)
         labels = [i.label for i in items]
         categories = [i.category for i in items]
@@ -761,7 +858,8 @@ def mission(
             "altitude_km": _number(dropoff.altitude_km, 2),
             "inclination_deg": _number(np.rad2deg(dropoff.inclination_rad), 4),
             "ltan_h": _number(local_time_of_ascending_node_h(dropoff, epoch), 4),
-            "ltan_offset_h": ltan_offset_h,
+            "node_offset_deg": node_offset_deg,
+            "kind": dropoff_kind,
         },
         "epoch_unix_ms": _unix_ms(epoch),
         "gap": {
@@ -776,7 +874,7 @@ def mission(
             "far_km": approach.far_km,
             "hold_km": approach.hold_km,
         },
-        "warning": warning,
+        "proximity": _proximity(proximity, error_scale),
         "lines": [
             {
                 "label": label,
@@ -798,7 +896,6 @@ def mission(
             "injection_inclination_error_deg": (
                 assumptions.injection_inclination_error_deg
             ),
-            "proximity_allocation_m_s": assumptions.proximity_allocation_m_s,
             "operations_days": assumptions.operations_days,
             "disposal_perigee_km": assumptions.disposal_perigee_km,
         },

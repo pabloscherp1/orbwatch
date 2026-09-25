@@ -141,6 +141,58 @@ def sun_synchronous_orbit(
     )
 
 
+SUN_SYNCHRONOUS_FAMILY_DEG: float = 5.0
+"""A target whose inclination is within this of sun-synchronous at its altitude
+is reached from a sun-synchronous rideshare; any other from a rideshare into its
+own inclination."""
+
+
+def rideshare_orbit(
+    target: CircularOrbit,
+    altitude_km: float,
+    node_offset_rad: float,
+    when_utc: datetime,
+) -> tuple[CircularOrbit, str]:
+    """The drop-off a rideshare would realistically give for this target.
+
+    Near-sun-synchronous targets, such as ENVISAT, are reached from a
+    sun-synchronous rideshare, the most common kind: its plane differs from the
+    target's by some node and a fraction of a degree of inclination. Any other
+    target, such as the ISS at 51.6 deg, needs a rideshare into its own
+    inclination, because J2 turns planes about the pole and cannot change
+    inclination: from a sun-synchronous drop-off the ISS would cost some 6 km/s.
+
+    Parameters
+    ----------
+    target : CircularOrbit
+    altitude_km : float
+        Drop-off altitude.
+    node_offset_rad : float
+        Drop-off node minus the target's, at ``when_utc``. For a sun-synchronous
+        drop-off each hour of local time of ascending node is 15 deg.
+    when_utc : datetime
+
+    Returns
+    -------
+    orbit : CircularOrbit
+    kind : {"sun-synchronous", "matched inclination"}
+    """
+    when = require_utc(when_utc)
+    a_km = EARTH_RADIUS_KM + altitude_km
+    raan = float((target.raan_at(when) + node_offset_rad) % (2.0 * np.pi))
+    try:
+        family = sun_synchronous_inclination_rad(target.a_km)
+    except ValueError:
+        family = None
+    if family is not None and abs(np.rad2deg(target.inclination_rad - family)) <= (
+        SUN_SYNCHRONOUS_FAMILY_DEG
+    ):
+        inclination, kind = sun_synchronous_inclination_rad(a_km), "sun-synchronous"
+    else:
+        inclination, kind = target.inclination_rad, "matched inclination"
+    return CircularOrbit(a_km, inclination, raan, when), kind
+
+
 @dataclass(frozen=True)
 class DriftOption:
     """One way of closing the node gap: go to a drift orbit, wait, come back up.
@@ -408,9 +460,16 @@ def disposal_dv_km_s(a_km: float, perigee_altitude_km: float) -> float:
 
 
 def budget_items(
-    plan: RendezvousPlan, assumptions: MissionAssumptions | None = None
+    plan: RendezvousPlan,
+    assumptions: MissionAssumptions | None = None,
+    proximity: tuple[float, str] | None = None,
 ) -> list[DeltaVItem]:
-    """The delta-v lines of the mission, from drop-off to disposal."""
+    """The delta-v lines of the mission, from drop-off to disposal.
+
+    ``proximity`` is (delta-v, basis) from a designed and Monte Carlo'd
+    proximity phase; without it the proximity line is the assumption's
+    allocation, at the 100% margin of anything not yet designed.
+    """
     assumptions = assumptions or MissionAssumptions()
     c = plan.chosen
     dispersion = hohmann(
@@ -448,11 +507,15 @@ def budget_items(
             "calculated",
             f"Lambert, {plan.approach.far_km:g} to {plan.approach.hold_km:g} km behind",
         ),
-        DeltaVItem(
-            "Proximity operations",
-            assumptions.proximity_allocation_m_s,
-            "allocation",
-            "allocation until designed",
+        (
+            DeltaVItem("Proximity operations", proximity[0], "calculated", proximity[1])
+            if proximity
+            else DeltaVItem(
+                "Proximity operations",
+                assumptions.proximity_allocation_m_s,
+                "allocation",
+                "allocation until designed",
+            )
         ),
         DeltaVItem(
             "Orbit maintenance and collision avoidance",

@@ -1181,6 +1181,10 @@ function setupControls() {
     else if (key === "f") state.view.follow = !state.view.follow;
     else if (key === "b") setMainView(state.mainView === "behaviour" ? "globe" : "behaviour");
     else if (key === "m") setMainView(state.mainView === "mission" ? "globe" : "mission");
+    else if (key === "p") {
+      if (state.mainView !== "mission") setMainView("mission");
+      mission.toggleMode();
+    }
     else if (["1", "2", "3", "4", "5", "6"].includes(key)) selectTab(TABS[Number(key) - 1]);
   });
 
