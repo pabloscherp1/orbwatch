@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "orbwatch"
 version = "0.1.0"
-description = "Satellite tracking and manoeuvre detection from public orbital data"
+description = "Track a satellite, read its behaviour from public data and plan a safe mission to inspect it"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Pablo Scherpereel Arce" }]
-keywords = ["astrodynamics", "sgp4", "space domain awareness", "manoeuvre detection"]
+keywords = ["astrodynamics", "sgp4", "space domain awareness", "manoeuvre detection", "mission design", "rendezvous", "proximity operations"]
 dependencies = [
     "numpy>=1.26",
     "sgp4>=2.23",

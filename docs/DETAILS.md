@@ -1,0 +1,106 @@
+# ORBWATCH in detail
+
+The [README](../README.md) is the short version. This page has the full feature list, every validation check and every known limit.
+
+## Features
+
+**Catalogue and propagation**
+- Element sets from Celestrak (current) and Space-Track (history), cached and
+  rate-limited
+- SGP4 propagation; TEME, Earth-fixed and WGS-84 geodetic frames, checked
+  against astropy
+- Ground station look angles, lighting and pass prediction
+
+**Manoeuvre detection**
+- Cleans a history: merges re-fits of the same epoch and rejects transient bad
+  fits with a two-sided test
+- Flags, gap by gap between catalogue updates, any change the object's recent
+  natural motion does not explain: in plane from the semi-major axis, out of
+  plane from the inclination, or the inclination vector at GEO
+- Separates burns from fit noise, from jumps that undo themselves and from
+  drag surges caused by space weather
+
+**Delta-v budgets**
+- Checks detected burns against what physics requires: drag make-up in low
+  orbit, and at GEO the propellant needed to hold the orbit plane against its
+  natural precession
+- A satellite's station-keeping is therefore measured even when its individual
+  corrections are too small to resolve
+
+**Pattern of life**
+- Estimates a geostationary operator's east-west station-keeping from its own
+  history: the longitude box, where it burns, how often and how hard, plus the
+  drift acceleration against the J22 model
+- Forecasts the next burn two ways, from the cadence and from the physics of
+  the drift, scores both walk-forward on held-out burns and uses the one with
+  the better record
+
+**Mission design**
+- Plans a rendezvous from a rideshare drop-off to a catalogued target, from a
+  sun-synchronous rideshare or one into the target's own inclination: Hohmann
+  transfers with optimally split plane changes, a Lambert solver for the
+  far-range approach and J2 drift orbits that line up the orbit planes for
+  free, traded against time
+- Designs the proximity operations in the target's frame with
+  Clohessy-Wiltshire relative motion in curvilinear coordinates: radial hops
+  along the V-bar, a safety ellipse with radial and cross-track separation,
+  and two-impulse transfers chosen so that any single failed burn leaves the
+  spacecraft outside a keep-out sphere
+- Flies that sequence 1,000 times with navigation and burn errors, recomputing
+  every burn from a noisy relative position; the 99th-percentile delta-v is the
+  proximity line of the budget
+- Builds the delta-v budget with ESA assessment-study margins and sizes the
+  propellant
+
+**Tracker**
+- A local browser interface with three views of the selected object: a live
+  globe with ground track, footprint, station horizon and passes; its
+  behaviour, with history, manoeuvres, budgets and pattern of life; and a
+  mission plan to reach it, where the time budget, the drop-off and the
+  spacecraft can be changed and the time against delta-v trade updates live,
+  and the proximity operations around it, with the failure case of every burn
+  and the Monte Carlo behind the budget. Every number comes from the tested
+  Python modules; the browser only draws.
+
+## Validation
+
+One year of history to September 2026, at the default five-sigma threshold.
+
+| Object | Check | Result |
+|---|---|---|
+| ISS | 10 reboosts announced by NASA | 10 of 10 detected; the two published raise sizes matched within 4%; burns account for the drag make-up to within 2% |
+| NOAA 20 | Drag make-up | 3 burns, budget closes at 100% |
+| Hubble | No propulsion | No manoeuvres |
+| ISS, Tiangong, Hubble | G4 geomagnetic storm, 19 January 2026 | The same drag surge on all three, reported as natural |
+| INMARSAT 5-F3 | GEO north-south station-keeping | 46 m/s a year from holding the plane; about 10% resolved as individual burns, consistent with daily electric-propulsion firings |
+| INTELSAT 905 | Inclination not held | Plane drifts as the model predicts, within 9%; 46 east-west burns, roughly weekly, all in the same direction |
+| Lambert solver | Curtis, example 5.2 | Matched to the published four decimals |
+| Sun-synchronous local time | Sentinel-2A, published 22:30 | 22:30 |
+| Clohessy-Wiltshire, curvilinear | 5 km radial hop in low orbit against two-body motion, one orbit | Within 1.2 m, where straight-line coordinates are 55 m off |
+| Proximity operations, ENVISAT | Each burn failing in turn; 1,000 Monte Carlo runs | Every failure stays outside the 200 m keep-out sphere; 0.4% of runs enter it at typical errors, 19% at three times those |
+| INTELSAT 905 | Next-burn forecast, 18 held-out burns | Median error 1.4 days, the limit set by the operator's own variability in where it burns |
+
+## Limits
+
+- Element sets are mean elements fitted by the catalogue, not measurements.
+  The detector sees what survives that fit.
+- Corrections made more often than the catalogue updates show up as scatter,
+  not as events. Their total is still measured by the budget.
+- In low orbit, a low-thrust lowering looks like a drag surge.
+- The pattern-of-life forecast needs discrete burns with free drift between
+  them. A satellite steered continuously, as electric propulsion does, gets a
+  verdict saying so instead of a forecast.
+- The GEO drift model is a simplified Laplace-plane precession, good to about
+  10% over a year.
+- Proximity operations assume a near-circular target orbit, impulsive burns
+  and no differential drag. Navigation is one noisy fix at each burn, not a
+  filter, so the Monte Carlo is a sizing tool rather than a guidance design.
+
+## Conventions
+
+The astrodynamics is implemented here rather than imported, with one
+exception: SGP4, which nobody should reimplement. Every function documents its
+reference frame and units; internally the convention is km, km/s, radians and
+seconds, with metres and m/s for motion relative to a target.
+
+Space-Track downloads are cached under `data/cache/spacetrack`, as Space-Track asks, and requests are throttled well below its rate limits.
